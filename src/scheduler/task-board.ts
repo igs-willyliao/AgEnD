@@ -56,10 +56,27 @@ export const CARD_LIMITS = {
 const BOARD_DAYS = 14;
 const BATCH_MAX = 30;
 
+/**
+ * A refusal. `code` is its kind (and the HTTP status the dashboard gets); `key` and `args`, when set, name the same
+ * sentence for the dashboard to say in its own language (tasks.err.<key> with {0}, {1}… = args). Refusals only an
+ * instance can meet keep English only: they reach the instance, which reads the message.
+ */
 export class TaskBoardError extends Error {
-  constructor(readonly code: "not_found" | "invalid" | "too_long" | "forbidden" | "conflict" | "blocked_by_deps" | "needs_review", message: string) {
+  constructor(
+    readonly code: "not_found" | "invalid" | "too_long" | "forbidden" | "conflict" | "blocked_by_deps" | "needs_review",
+    message: string,
+    readonly key?: string,
+    readonly args: Array<string | number> = [],
+  ) {
     super(message);
   }
+}
+
+/** A note after a write: English for the agents, a key and its values for the dashboard (tasks.note.<key>). */
+export interface Note {
+  text: string;
+  key: string;
+  args: Array<string | number>;
 }
 
 export interface Project {
@@ -192,6 +209,8 @@ export interface CardEvent {
 
 /** What one committed write changed, for live views: the card numbers touched (none for a project change). */
 export interface BoardChange {
+  /** The board's revision after this write (revision()). */
+  rev: number;
   ids: string[];
   actors: string[];
   projects: boolean;
@@ -260,7 +279,24 @@ export interface MoveOptions {
 
 export interface MutationResult {
   card: Card;
+  /** English, for the agents. */
   notes: string[];
+  /** The same notes for the dashboard to say in its own language. */
+  said: Note[];
+}
+
+export interface MyWork {
+  /** Cards it works on itself: sub tasks, and main tasks without sub tasks. */
+  doing: Card[];
+  blocked: Card[];
+  review: Card[];
+  ready: Card[];
+  /** Cards it could take but for their dependencies, with the card numbers they wait for. */
+  waiting: Array<{ card: Card; waitsFor: string[] }>;
+  newComments: Array<{ card: Card; entries: Entry[] }>;
+  sentBack: Array<{ card: Card; entry: Entry }>;
+  /** Main tasks it coordinates (they have sub tasks). */
+  mains: Array<{ card: Card; progress: Progress }>;
 }
 
 export interface SearchHit {
@@ -279,9 +315,16 @@ const length = (s: string) => [...s].length;
 const isFinished = (c: Card) => c.status === "done" || c.status === "cancelled";
 const isPerson = (a: Actor) => a.kind === "person";
 
+/** The field a too-long refusal names, for the dashboard's word for it. */
+const FIELD_KEY: Record<string, string> = {
+  "the title": "title", "the goal": "goal", "the scope": "scope", "the context": "context", "state": "state", "the result": "result",
+  "the blocked reason": "blockedReason", "the reason": "reason", "the log line": "log", "the comment": "comment",
+  "an acceptance item": "acceptance", "the description": "projectDescription", "the project's name": "projectName",
+};
+
 function checkText(field: string, value: string, max: number): string {
   const v = value.trim();
-  if (length(v) > max) throw new TaskBoardError("too_long", `${field} is too long: ${length(v)} characters, at most ${max}`);
+  if (length(v) > max) throw new TaskBoardError("too_long", `${field} is too long: ${length(v)} characters, at most ${max}`, "too_long", [FIELD_KEY[field] ?? field, length(v), max]);
   return v;
 }
 
@@ -289,7 +332,7 @@ function checkState(value: string): string {
   const v = checkText("state", value, CARD_LIMITS.state);
   const lines = v.split("\n").filter((l) => l.trim() !== "").length;
   if (lines > CARD_LIMITS.stateLines) {
-    throw new TaskBoardError("too_long", `state is at most ${CARD_LIMITS.stateLines} lines (it has ${lines}): done / next / watch out; details go in the log`);
+    throw new TaskBoardError("too_long", `state is at most ${CARD_LIMITS.stateLines} lines (it has ${lines}): done / next / watch out; details go in the log`, "state_lines", [CARD_LIMITS.stateLines, lines]);
   }
   return v;
 }
@@ -297,7 +340,7 @@ function checkState(value: string): string {
 function checkAcceptance(items: string[], existing: AcceptanceItem[] = []): AcceptanceItem[] {
   return items.map((raw) => {
     const text = checkText("an acceptance item", raw, CARD_LIMITS.acceptanceText);
-    if (!text) throw new TaskBoardError("invalid", "an acceptance item cannot be empty");
+    if (!text) throw new TaskBoardError("invalid", "an acceptance item cannot be empty", "acceptance_empty");
     return { text, done: existing.find((e) => e.text === text)?.done ?? false };
   });
 }
@@ -378,7 +421,9 @@ export class TaskBoard {
   private listeners: Array<(change: BoardChange) => void> = [];
   private pending: Array<{ code: string; actor: string }> = [];
   private projectsChanged = false;
-  private notes: string[] = [];
+  private notes: Note[] = [];
+  /** The notes of the last write, until a caller of the `task` tool's old actions takes them (takeNotes). */
+  private lastNotes: string[] = [];
   private codes = new Map<string, string>();
 
   constructor(private readonly db: Database.Database, private readonly now: () => Date = () => new Date()) {}
@@ -453,25 +498,38 @@ export class TaskBoard {
       );
       CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(task_id, id);
       CREATE TABLE IF NOT EXISTS task_counters (prefix TEXT PRIMARY KEY, next INTEGER NOT NULL);
-      INSERT OR IGNORE INTO task_counters (prefix, next) VALUES ('M', 1), ('S', 1);
     `);
-    this.db.transaction(() => {
-      const rows = this.db.prepare("SELECT id, status, updated_at FROM tasks WHERE code IS NULL ORDER BY created_at, rowid").all() as Row[];
-      const fill = this.db.prepare("UPDATE tasks SET code = ?, kind = 'main', sort = COALESCE(sort, ?), done_at = COALESCE(done_at, ?) WHERE id = ?");
-      for (const r of rows) fill.run(this.nextCode("M"), this.nextSort(), r.status === "done" ? r.updated_at : null, r.id);
-      this.db.exec("UPDATE tasks SET sort = rowid WHERE sort IS NULL");
-      this.db.exec("DELETE FROM task_entries WHERE task_id NOT IN (SELECT id FROM tasks)");
-      this.db.exec("DELETE FROM task_events WHERE task_id NOT IN (SELECT id FROM tasks)");
-    }).immediate();
+    // Every open (the CLI opens this file for each command) only reads: the write lock is taken only when a counter
+    // is missing or a row needs a number. (CREATE … IF NOT EXISTS of what exists takes no lock; an INSERT does.)
+    if ((this.db.prepare("SELECT COUNT(*) AS n FROM task_counters WHERE prefix IN ('M', 'S', 'R')").get() as { n: number }).n < 3) {
+      this.db.exec("INSERT OR IGNORE INTO task_counters (prefix, next) VALUES ('M', 1), ('S', 1), ('R', 0)");
+    }
+    if (this.db.prepare("SELECT 1 FROM tasks WHERE code IS NULL OR sort IS NULL LIMIT 1").get()) {
+      this.tx(() => {
+        const rows = this.db.prepare("SELECT id, status, updated_at FROM tasks WHERE code IS NULL ORDER BY created_at, rowid").all() as Row[];
+        const fill = this.db.prepare("UPDATE tasks SET code = ?, kind = 'main', sort = COALESCE(sort, ?), done_at = COALESCE(done_at, ?) WHERE id = ?");
+        for (const r of rows) fill.run(this.nextCode("M"), this.nextSort(), r.status === "done" ? r.updated_at : null, r.id);
+        this.db.exec("UPDATE tasks SET sort = rowid WHERE sort IS NULL");
+        if (rows.length) { this.projectsChanged = true; }
+      });
+    }
     this.reconcile();
   }
 
-  /** Main tasks whose sub tasks moved while nothing derived them (e.g. under a release without the board). */
+  /**
+   * Main tasks whose sub tasks moved while nothing derived them (under a release without the board). Read first; the
+   * write lock only when one is out of step.
+   */
   reconcile(): void {
-    this.tx(() => {
-      const rows = this.db.prepare("SELECT DISTINCT p.* FROM tasks p JOIN tasks c ON c.parent_id = p.id WHERE p.kind = 'main'").all() as Row[];
-      for (const main of rows.map(toCard)) this.deriveMain(main, SYSTEM_ACTOR);
-    });
+    const rows = this.db.prepare("SELECT DISTINCT p.* FROM tasks p JOIN tasks c ON c.parent_id = p.id WHERE p.kind = 'main' AND p.status NOT IN ('cancelled', 'blocked')").all() as Row[];
+    const behind = rows.map(toCard).filter((main) => this.derivedStatus(main) !== main.status);
+    if (!behind.length) return;
+    this.tx(() => { for (const main of behind) { const fresh = this.byUuid(main.uuid); if (fresh) this.deriveMain(fresh, SYSTEM_ACTOR); } });
+  }
+
+  /** The board's revision: it moves with every committed change, so a page reads the board again only when it moved. */
+  revision(): number {
+    return Number((this.db.prepare("SELECT next FROM task_counters WHERE prefix = 'R'").get() as { next: number } | undefined)?.next ?? 0);
   }
 
   // ── Projects ────────────────────────────────────────────
@@ -489,7 +547,7 @@ export class TaskBoard {
       : this.db.prepare("SELECT * FROM task_projects WHERE name = ?").get(text) as Row | undefined;
     if (!row) {
       const names = this.listProjects().map((p) => p.name);
-      throw new TaskBoardError("not_found", `no project "${text}"${names.length ? ` (projects: ${names.join(", ")})` : ""}`);
+      throw new TaskBoardError("not_found", `no project "${text}"${names.length ? ` (projects: ${names.join(", ")})` : ""}`, "project_not_found", [text]);
     }
     return toProject(row);
   }
@@ -523,10 +581,10 @@ export class TaskBoard {
 
   private checkProjectName(raw: string, selfId: number | null): string {
     const name = checkText("the project's name", raw, CARD_LIMITS.projectName);
-    if (!name) throw new TaskBoardError("invalid", "a project needs a name");
-    if (/^\d+$/.test(name)) throw new TaskBoardError("invalid", "a project's name cannot be only digits");
+    if (!name) throw new TaskBoardError("invalid", "a project needs a name", "project_name_empty");
+    if (/^\d+$/.test(name)) throw new TaskBoardError("invalid", "a project's name cannot be only digits", "project_name_digits");
     const clash = this.db.prepare("SELECT id FROM task_projects WHERE name = ?").get(name) as Row | undefined;
-    if (clash && Number(clash.id) !== selfId) throw new TaskBoardError("invalid", `there is already a project named "${name}"`);
+    if (clash && Number(clash.id) !== selfId) throw new TaskBoardError("invalid", `there is already a project named "${name}"`, "project_name_taken", [name]);
     return name;
   }
 
@@ -534,7 +592,7 @@ export class TaskBoard {
   private projectForMain(ref: string | number | null | undefined): number | null {
     if (ref === undefined || ref === null || String(ref).trim() === "") return null;
     const project = this.getProject(ref);
-    if (project.archived) throw new TaskBoardError("invalid", `project "${project.name}" is archived; it takes no new main tasks`);
+    if (project.archived) throw new TaskBoardError("invalid", `project "${project.name}" is archived; it takes no new main tasks`, "project_archived", [project.name]);
     return project.id;
   }
 
@@ -558,7 +616,7 @@ export class TaskBoard {
 
   getCard(ref: string): Card {
     const card = this.findCard(ref);
-    if (!card) throw new TaskBoardError("not_found", `no card ${cardCode(ref) ?? `"${ref}"`}`);
+    if (!card) throw new TaskBoardError("not_found", `no card ${cardCode(ref) ?? `"${ref}"`}`, "card_not_found", [cardCode(ref) ?? ref]);
     return card;
   }
 
@@ -839,9 +897,74 @@ export class TaskBoard {
     return null;
   }
 
+  /**
+   * Cards by project (an id or name; null: No project), main task (its sub tasks), assignee and status (live ones by
+   * default), main tasks first, then by status and priority; at most `limit` (default 50), with how many matched.
+   */
+  listCards(filter: { project?: string | number | null; parent?: string; assignee?: string; status?: CardStatus[]; limit?: number }): { cards: Card[]; total: number } {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (filter.project !== undefined) {
+      if (filter.project === null) where.push("project_id IS NULL");
+      else { where.push("project_id = ?"); params.push(this.getProject(filter.project).id); }
+    }
+    if (filter.parent) { where.push("parent_id = ?"); params.push(this.getCard(filter.parent).uuid); }
+    if (filter.assignee) { where.push("assignee = ?"); params.push(filter.assignee); }
+    const statuses = filter.status?.length ? filter.status : LIVE_CARD_STATUSES;
+    where.push(`status IN (${statuses.map(() => "?").join(", ")})`);
+    params.push(...statuses);
+    const from = `FROM tasks WHERE ${where.join(" AND ")}`;
+    const { n } = this.db.prepare(`SELECT COUNT(*) AS n ${from}`).get(...params) as { n: number };
+    const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
+    const rows = this.db.prepare(`SELECT * ${from} ORDER BY CASE kind WHEN 'main' THEN 0 ELSE 1 END, ${STATUS_ORDER}, ${PRIORITY_ORDER}, sort LIMIT ?`).all(...params, limit) as Row[];
+    return { cards: rows.map(toCard), total: n };
+  }
+
+  /** On the board's terms: in a project, a sub task, one with sub tasks, or one that waits for the person. */
+  isOnBoard(card: Card): boolean {
+    return card.projectId !== null || card.kind === "sub" || card.needsReview || this.activeSubs(card.uuid).length > 0;
+  }
+
+  /**
+   * An instance's work, for `task mine`: what it is doing, what is blocked or waits for the person, what it can start
+   * (its own open cards, and the unassigned sub tasks of main tasks it coordinates, dependencies done) and what waits
+   * on dependencies; comments it has not seen and work sent back; the main tasks it coordinates and how far along.
+   */
+  myWork(name: string): MyWork {
+    const mine = (this.db.prepare(`SELECT * FROM tasks WHERE assignee = ? AND status IN ('open', 'claimed', 'blocked', 'review') ORDER BY ${STATUS_ORDER}, ${PRIORITY_ORDER}, sort`)
+      .all(name) as Row[]).map(toCard);
+    const coordinating = mine.filter((c) => c.kind === "main" && this.activeSubs(c.uuid).length > 0);
+    const work = mine.filter((c) => !coordinating.includes(c));
+    const unassigned = coordinating.length
+      ? (this.db.prepare(`SELECT * FROM tasks WHERE assignee IS NULL AND status = 'open' AND parent_id IN (${coordinating.map(() => "?").join(", ")}) ORDER BY ${PRIORITY_ORDER}, sort`)
+        .all(...coordinating.map((c) => c.uuid)) as Row[]).map(toCard)
+      : [];
+    const candidates = [...work.filter((c) => c.status === "open"), ...unassigned];
+    const unmet = candidates.map((card) => ({ card, waitsFor: this.unmetDeps(card).map((d) => d.code) }));
+    const newComments: MyWork["newComments"] = [];
+    const sentBack: MyWork["sentBack"] = [];
+    for (const card of mine) {
+      const fresh = this.newComments(card);
+      const reject = [...fresh].reverse().find((e) => e.kind === "reject");
+      if (reject) sentBack.push({ card, entry: reject });
+      const comments = fresh.filter((e) => e.kind === "comment");
+      if (comments.length) newComments.push({ card, entries: comments });
+    }
+    return {
+      doing: work.filter((c) => c.status === "claimed"),
+      blocked: work.filter((c) => c.status === "blocked"),
+      review: work.filter((c) => c.status === "review"),
+      ready: unmet.filter((x) => !x.waitsFor.length).map((x) => x.card),
+      waiting: unmet.filter((x) => x.waitsFor.length),
+      newComments,
+      sentBack,
+      mains: coordinating.map((card) => ({ card, progress: this.progress(card) })),
+    };
+  }
+
   // ── Writing: the board ──────────────────────────────────
 
-  createCards(actor: Actor, input: { project?: string | number | null; parent?: string | null; cards: NewCard[] }): { cards: Card[]; notes: string[] } {
+  createCards(actor: Actor, input: { project?: string | number | null; parent?: string | null; cards: NewCard[] }): { cards: Card[]; notes: string[]; said: Note[] } {
     if (input.cards.length === 0) throw new TaskBoardError("invalid", "no cards to create");
     if (input.cards.length > BATCH_MAX) throw new TaskBoardError("invalid", `at most ${BATCH_MAX} cards at a time`);
     return this.tx(() => {
@@ -863,10 +986,10 @@ export class TaskBoard {
             projectId = parent.projectId;
           }
           const title = checkText("the title", spec.title ?? "", CARD_LIMITS.title);
-          if (!title) throw new TaskBoardError("invalid", "a card needs a title");
-          if (kind === "sub" && spec.scope) throw new TaskBoardError("invalid", "scope is for main tasks only");
+          if (!title) throw new TaskBoardError("invalid", "a card needs a title", "title_empty");
+          if (kind === "sub" && spec.scope) throw new TaskBoardError("invalid", "scope is for main tasks only", "scope_main_only");
           const acceptance = checkAcceptance(spec.acceptance ?? []);
-          if (acceptance.length > CARD_LIMITS.acceptanceItems) throw new TaskBoardError("too_long", `at most ${CARD_LIMITS.acceptanceItems} acceptance items`);
+          if (acceptance.length > CARD_LIMITS.acceptanceItems) throw new TaskBoardError("too_long", `at most ${CARD_LIMITS.acceptanceItems} acceptance items`, "acceptance_max", [CARD_LIMITS.acceptanceItems]);
           const needsReview = spec.needsReview ?? kind === "main";
           if (!needsReview && kind === "main" && !isPerson(actor)) throw new TaskBoardError("forbidden", "only a person can open a main task that skips their confirmation");
           const now = this.nowIso();
@@ -906,13 +1029,13 @@ export class TaskBoard {
           created.push(card);
           if (card.parent) mains.add(card.parent);
         } catch (err) {
-          if (err instanceof TaskBoardError) throw new TaskBoardError(err.code, `${which}${err.message}`);
+          if (err instanceof TaskBoardError) throw new TaskBoardError(err.code, `${which}${err.message}`, err.key, err.args);
           throw err;
         }
       });
       for (const card of created) this.assertNoCycle(card.uuid);
       for (const uuid of mains) this.deriveMain(this.byUuid(uuid)!, actor);
-      return { cards: created, notes: this.notes };
+      return { cards: created, ...this.spoken() };
     });
   }
 
@@ -937,21 +1060,21 @@ export class TaskBoard {
 
       if (patch.title !== undefined) {
         const title = checkText("the title", patch.title, CARD_LIMITS.title);
-        if (!title) throw new TaskBoardError("invalid", "the title cannot be empty");
+        if (!title) throw new TaskBoardError("invalid", "the title cannot be empty", "title_empty");
         set("title", title);
       }
       if (patch.goal !== undefined) set("goal", checkText("the goal", patch.goal, CARD_LIMITS.goal));
       if (patch.scope !== undefined) {
-        if (card.kind !== "main") throw new TaskBoardError("invalid", "scope is for main tasks only");
+        if (card.kind !== "main") throw new TaskBoardError("invalid", "scope is for main tasks only", "scope_main_only");
         set("scope", checkText("the scope", patch.scope, CARD_LIMITS.scope));
       }
       if (patch.context !== undefined) set("context", checkText("the context", patch.context, CARD_LIMITS.context));
       if (patch.state !== undefined) set("state", checkState(patch.state));
       if (patch.result !== undefined) set("result", checkText("the result", patch.result, CARD_LIMITS.result));
       if (patch.blockedReason !== undefined) {
-        if (card.status !== "blocked") throw new TaskBoardError("invalid", "only a blocked card has a blocked reason");
+        if (card.status !== "blocked") throw new TaskBoardError("invalid", "only a blocked card has a blocked reason", "blocked_reason_not_blocked");
         const reason = checkText("the blocked reason", patch.blockedReason, CARD_LIMITS.blockedReason);
-        if (!reason) throw new TaskBoardError("invalid", "the blocked reason cannot be empty");
+        if (!reason) throw new TaskBoardError("invalid", "the blocked reason cannot be empty", "block_reason");
         set("blockedReason", reason);
       }
       if (patch.size !== undefined) set("size", patch.size);
@@ -972,7 +1095,7 @@ export class TaskBoard {
       }
       if (patch.projectId !== undefined && patch.projectId !== card.projectId) {
         if (ai) throw new TaskBoardError("forbidden", "only a person can move a main task to another project");
-        if (card.kind !== "main") throw new TaskBoardError("invalid", "a sub task follows its main task's project; move the main task");
+        if (card.kind !== "main") throw new TaskBoardError("invalid", "a sub task follows its main task's project; move the main task", "sub_project");
         const projectId = this.projectForMain(patch.projectId);
         set("projectId", projectId);
         this.db.prepare("UPDATE tasks SET project_id = ? WHERE parent_id = ?").run(projectId, card.uuid);
@@ -981,10 +1104,10 @@ export class TaskBoard {
       if (patch.acceptance !== undefined || patch.addAcceptance !== undefined || patch.check !== undefined || patch.uncheck !== undefined) {
         let acceptance = patch.acceptance !== undefined ? checkAcceptance(patch.acceptance, card.acceptance) : card.acceptance.map((a) => ({ ...a }));
         if (patch.addAcceptance) acceptance = [...acceptance, ...checkAcceptance(patch.addAcceptance)];
-        if (acceptance.length > CARD_LIMITS.acceptanceItems) throw new TaskBoardError("too_long", `at most ${CARD_LIMITS.acceptanceItems} acceptance items`);
+        if (acceptance.length > CARD_LIMITS.acceptanceItems) throw new TaskBoardError("too_long", `at most ${CARD_LIMITS.acceptanceItems} acceptance items`, "acceptance_max", [CARD_LIMITS.acceptanceItems]);
         const mark = (indexes: number[] | undefined, done: boolean) => {
           for (const n of indexes ?? []) {
-            if (!Number.isInteger(n) || n < 1 || n > acceptance.length) throw new TaskBoardError("invalid", `there is no acceptance item ${n} (there are ${acceptance.length})`);
+            if (!Number.isInteger(n) || n < 1 || n > acceptance.length) throw new TaskBoardError("invalid", `there is no acceptance item ${n} (there are ${acceptance.length})`, "acceptance_no_item", [n, acceptance.length]);
             acceptance[n - 1]!.done = done;
           }
         };
@@ -1021,7 +1144,7 @@ export class TaskBoard {
         }
       }
 
-      if (!touched) return { card, notes: ["no change"] };
+      if (!touched) return { card, notes: ["no change"], said: [] };
       card.version++;
       card.updatedAt = this.nowIso();
       this.surfaceComments(card, actor);
@@ -1030,9 +1153,9 @@ export class TaskBoard {
       if (changes.dependsOn) this.assertNoCycle(card.uuid);
       if (Object.keys(changes).length) this.event(actor, card, "updated", { changes });
       if (changes.acceptance && card.status === "claimed" && card.acceptance.every((a) => a.done)) {
-        this.notes.push(`every acceptance item is checked: ${card.code} can move to ${requiresReview(card) ? "review" : "done"}`);
+        this.say("acceptance_all", [card.code, requiresReview(card) ? "review" : "done"], `every acceptance item is checked: ${card.code} can move to ${requiresReview(card) ? "review" : "done"}`);
       }
-      return { card, notes: this.notes };
+      return { card, ...this.spoken() };
     });
   }
 
@@ -1041,7 +1164,7 @@ export class TaskBoard {
       const card = this.getCard(ref);
       this.checkVersion(card, options.version);
       const from = card.status;
-      if (from === to) throw new TaskBoardError("invalid", `${card.code} is already ${to}`);
+      if (from === to) throw new TaskBoardError("invalid", `${card.code} is already ${to}`, "already", [card.code, to]);
       const reason = checkText("the reason", options.reason ?? "", CARD_LIMITS.reason);
       if (options.result !== undefined) {
         const result = checkText("the result", options.result, CARD_LIMITS.result);
@@ -1055,7 +1178,7 @@ export class TaskBoard {
       else this.checkManualMove(card, actor, to, reason);
 
       this.applyMove(card, actor, to, reason, options.comment);
-      return { card, from, notes: this.notes };
+      return { card, from, ...this.spoken() };
     });
   }
 
@@ -1069,8 +1192,11 @@ export class TaskBoard {
       const a = after ? this.getCard(after).sort : null;
       const b = before ? this.getCard(before).sort : null;
       let sort: number;
-      if (a !== null && b !== null) sort = (a + b) / 2;
-      else if (a !== null) sort = a + 1;
+      if (a !== null && b !== null) {
+        // Halving the gap again and again runs out of numbers: spread every card out again first.
+        if (Math.abs(b - a) < 1e-6) { this.renumber(); return this.reorder(actor, ref, after, before); }
+        sort = (a + b) / 2;
+      } else if (a !== null) sort = a + 1;
       else if (b !== null) sort = b - 1;
       else return card;
       if (sort === card.sort) return card;
@@ -1092,7 +1218,8 @@ export class TaskBoard {
       const now = this.nowIso();
       const card: Card = {
         uuid: randomUUID(), code: this.nextCode("M"), kind: "main", projectId: null, parent: null, title: params.title, status: "open",
-        assignee: params.assignee ?? null, priority: params.priority ?? "normal", size: null, needsReview: false, deps: params.depends_on ?? [],
+        assignee: params.assignee ?? null, priority: params.priority ?? "normal", size: null, needsReview: false,
+        deps: this.checkDeps({ uuid: null, kind: "main", parent: null }, params.depends_on ?? []),
         goal: params.description ?? "", scope: "", acceptance: [], context: "", state: "", blockedReason: "", result: "", sort: this.nextSort(),
         createdBy: actor.name, version: 1, createdAt: now, updatedAt: now, startedAt: null, submittedAt: null, doneAt: null, seenEntryId: 0,
       };
@@ -1109,7 +1236,7 @@ export class TaskBoard {
    * them), and a person is never held to an instance's rules.
    */
   private heldToBoardRules(card: Card, actor: Actor): boolean {
-    return !isPerson(actor) && (card.projectId !== null || card.kind === "sub" || card.needsReview || this.activeSubs(card.uuid).length > 0);
+    return !isPerson(actor) && this.isOnBoard(card);
   }
 
   /**
@@ -1219,6 +1346,9 @@ export class TaskBoard {
       if (touched) {
         card.version++;
         card.updatedAt = this.nowIso();
+        // As on the board: its assignee's write hands over the comments it had not seen, then they count as seen.
+        this.surfaceComments(card, actor);
+        this.markSeen(card, actor);
         this.save(card);
       }
       return card;
@@ -1234,7 +1364,7 @@ export class TaskBoard {
     const own = card.assignee === actor.name;
     if (card.kind === "sub" && to !== "cancelled") {
       const main = card.parent ? this.byUuid(card.parent) : undefined;
-      if (main?.status === "cancelled") throw new TaskBoardError("invalid", `main task ${main.code} is cancelled; restore it first to keep working on this`);
+      if (main?.status === "cancelled") throw new TaskBoardError("invalid", `main task ${main.code} is cancelled; restore it first to keep working on this`, "main_cancelled", [main.code]);
     }
     const notOwner = () => new TaskBoardError("forbidden", `${card.code} belongs to ${card.assignee ?? "nobody"}; you cannot move it`);
 
@@ -1249,15 +1379,18 @@ export class TaskBoard {
             }
             if (!card.assignee) this.assign(card, actor.name, actor);
           } else if (unmet.length) {
-            this.notes.push(`note: ${unmet.map((c) => c.code).join(", ")} ${unmet.length === 1 ? "is" : "are"} not done yet`);
+            this.say("deps_unmet", [unmet.map((c) => c.code).join(", ")], `note: ${unmet.map((c) => c.code).join(", ")} ${unmet.length === 1 ? "is" : "are"} not done yet`);
           }
         } else if (from === "blocked") {
           if (ai && !own) throw notOwner();
         } else if (from === "review") {
           if (ai) {
             if (!own) throw notOwner();
+            // Out of the person's queue: they read why.
+            if (!reason) throw new TaskBoardError("invalid", "taking a card back from review needs a reason (the person reads it)");
+            this.entry(card, "comment", actor, `withdrawn from review: ${reason}`);
           } else {
-            if (!reason) throw new TaskBoardError("invalid", "sending work back needs a reason");
+            if (!reason) throw new TaskBoardError("invalid", "sending work back needs a reason", "sendback_reason");
             this.entry(card, "reject", actor, reason);
           }
         } else if (ai) {
@@ -1270,7 +1403,7 @@ export class TaskBoard {
           if (from !== "claimed") throw new TaskBoardError("invalid", `only a card in progress can be blocked (${card.code} is ${from})`);
           if (!own) throw notOwner();
         }
-        if (!reason) throw new TaskBoardError("invalid", "blocking needs a reason: who has to answer what");
+        if (!reason) throw new TaskBoardError("invalid", "blocking needs a reason: who has to answer what", "block_reason");
         return;
       }
       case "review": {
@@ -1283,6 +1416,7 @@ export class TaskBoard {
       }
       case "done": {
         if (ai) {
+          if (from === "review") throw new TaskBoardError("forbidden", `${card.code} is waiting for the person's confirmation: only they finish it`);
           if (from !== "claimed") throw new TaskBoardError("invalid", `only a card in progress can be done (${card.code} is ${from})`);
           if (!own) throw notOwner();
           if (requiresReview(card)) throw new TaskBoardError("needs_review", `${card.code} needs the person's confirmation; move it to review`);
@@ -1299,7 +1433,7 @@ export class TaskBoard {
           this.assign(card, null, actor);
         } else if (from === "review") {
           // Sending back from review is a rejection either way, so the assignee hears why.
-          if (!reason) throw new TaskBoardError("invalid", "sending work back needs a reason");
+          if (!reason) throw new TaskBoardError("invalid", "sending work back needs a reason", "sendback_reason");
           this.entry(card, "reject", actor, reason);
         }
         return;
@@ -1330,9 +1464,9 @@ export class TaskBoard {
     }
     if (to === "blocked") {
       // Only live work can be blocked; otherwise blocking then unblocking would reopen a finished main task.
-      if (ai ? from !== "claimed" : isFinished(card)) throw new TaskBoardError("invalid", `${card.code} is ${from}; it cannot be blocked`);
+      if (ai ? from !== "claimed" : isFinished(card)) throw new TaskBoardError("invalid", `${card.code} is ${from}; it cannot be blocked`, "cannot_block", [card.code, from]);
       if (ai && !own) throw notOwner();
-      if (!reason) throw new TaskBoardError("invalid", "blocking needs a reason: who has to answer what");
+      if (!reason) throw new TaskBoardError("invalid", "blocking needs a reason: who has to answer what", "block_reason");
       return;
     }
     if (from === "blocked" && to === "claimed") {
@@ -1356,18 +1490,18 @@ export class TaskBoard {
       return;
     }
     if (from === "review" && to === "claimed") {
-      if (!reason) throw new TaskBoardError("invalid", "sending work back needs a reason");
+      if (!reason) throw new TaskBoardError("invalid", "sending work back needs a reason", "sendback_reason");
       this.entry(card, "reject", actor, reason);
       return;
     }
     if ((from === "done" && to === "claimed") || (from === "cancelled" && to === "open")) return;
-    throw new TaskBoardError("invalid", `${card.code} has sub tasks; its status follows them — you can confirm it, send it back, block it or cancel it`);
+    throw new TaskBoardError("invalid", `${card.code} has sub tasks; its status follows them — you can confirm it, send it back, block it or cancel it`, "derived_move", [card.code]);
   }
 
   /** What leaving "in progress" as finished (review or done) needs. */
   private checkFinish(card: Card, ai: boolean, reason: string): void {
     const open = this.children(card.uuid).filter((k) => !isFinished(k));
-    if (open.length) throw new TaskBoardError("invalid", `${card.code} still has unfinished sub tasks: ${open.map((k) => k.code).join(", ")}`);
+    if (open.length) throw new TaskBoardError("invalid", `${card.code} still has unfinished sub tasks: ${open.map((k) => k.code).join(", ")}`, "unfinished_subs", [card.code, open.map((k) => k.code).join(", ")]);
     if (!ai) return;
     if (!card.result) throw new TaskBoardError("invalid", "finishing needs a result: which files changed and how it was checked");
     const unchecked = card.acceptance.map((a, i) => ({ ...a, n: i + 1 })).filter((a) => !a.done);
@@ -1419,16 +1553,20 @@ export class TaskBoard {
    * are all done, review (or done, for one that skips the person's confirmation). Only a person moves it from review
    * to done. A blocked or cancelled main task is left alone, and so is one without sub tasks (it is moved by hand).
    */
-  private deriveMain(main: Card, actor: Actor): void {
-    if (main.status === "cancelled" || main.status === "blocked") return;
+  /** What a main task's sub tasks make its status (its own, when it is blocked, cancelled or has none). */
+  private derivedStatus(main: Card): CardStatus {
+    if (main.status === "cancelled" || main.status === "blocked") return main.status;
     const subs = this.activeSubs(main.uuid);
-    if (!subs.length) return;
+    if (!subs.length) return main.status;
     const allDone = subs.every((k) => k.status === "done");
     const started = main.startedAt !== null || subs.some((k) => k.status !== "open");
     const finished: CardStatus = requiresReview(main) ? "review" : "done";
-    let next: CardStatus;
-    if (main.status === "done" || main.status === "review") next = allDone ? main.status : started ? "claimed" : "open";
-    else next = allDone ? finished : started ? "claimed" : "open";
+    if (main.status === "done" || main.status === "review") return allDone ? main.status : started ? "claimed" : "open";
+    return allDone ? finished : started ? "claimed" : "open";
+  }
+
+  private deriveMain(main: Card, actor: Actor): void {
+    const next = this.derivedStatus(main);
     if (next === main.status) return;
     const from = main.status;
     const now = this.nowIso();
@@ -1440,8 +1578,8 @@ export class TaskBoard {
     main.updatedAt = now;
     this.save(main);
     this.event(actor, main, "moved", { from, to: next, auto: true });
-    if (next === "review") this.notes.push(`${main.code} "${main.title}": every sub task is done; it is waiting for the person's confirmation`);
-    else if (from === "done" || from === "review") this.notes.push(`${main.code} has unfinished sub tasks again; it is back to ${next}`);
+    if (next === "review") this.say("review_waiting", [main.code, main.title], `${main.code} "${main.title}": every sub task is done; it is waiting for the person's confirmation`);
+    else if (from === "done" || from === "review") this.say("back_to", [main.code, next], `${main.code} has unfinished sub tasks again; it is back to ${next}`);
     if (next === "done") this.noteUnblocked(main);
   }
 
@@ -1473,11 +1611,41 @@ export class TaskBoard {
     }
   }
 
+  /** `card` is done: the open cards that waited for it and wait for nothing else now can start. */
   private noteUnblocked(card: Card): void {
     const rows = this.db.prepare("SELECT * FROM tasks WHERE status = 'open' AND depends_on LIKE ?").all(`%"${card.uuid}"%`) as Row[];
     for (const dependent of rows.map(toCard)) {
-      if (this.unmetDeps(dependent).length === 0) this.notes.push(`${dependent.code}'s dependencies are all done; it can start`);
+      if (this.unmetDeps(dependent).length === 0) this.say("deps_done", [dependent.code], `${dependent.code}'s dependencies are all done; it can start`);
     }
+  }
+
+  /** Every card's place again 1, 2, 3… in the same order (reorder() calls it when two neighbours touch). */
+  private renumber(): void {
+    const rows = this.db.prepare("SELECT id FROM tasks ORDER BY sort, rowid").all() as Array<{ id: string }>;
+    const set = this.db.prepare("UPDATE tasks SET sort = ? WHERE id = ?");
+    rows.forEach((r, i) => set.run(i + 1, r.id));
+  }
+
+  /** Several of the board's writes as one: all of them or none (the `task` tool's update with fields and a status). */
+  atomically<T>(fn: () => T): T {
+    return this.tx(fn);
+  }
+
+  /** This write's notes so far, both ways. */
+  private spoken(): { notes: string[]; said: Note[] } {
+    return { notes: this.notes.map((n) => n.text), said: [...this.notes] };
+  }
+
+  /** A note of this write: English for agents, its key and values for the dashboard. */
+  private say(key: string, args: Array<string | number>, text: string): void {
+    this.notes.push({ text, key, args });
+  }
+
+  /** The last write's notes (English), once: the `task` tool's old actions return them with their answer. */
+  takeNotes(): string[] {
+    const notes = this.lastNotes;
+    this.lastNotes = [];
+    return notes;
   }
 
   // ── Helpers ─────────────────────────────────────────────
@@ -1492,11 +1660,16 @@ export class TaskBoard {
     this.projectsChanged = false;
     this.notes = [];
     try {
-      const result = this.db.transaction(fn).immediate();
+      const result = this.db.transaction(() => {
+        const r = fn();
+        if (this.pending.length || this.projectsChanged) this.db.prepare("UPDATE task_counters SET next = next + 1 WHERE prefix = 'R'").run();
+        return r;
+      }).immediate();
+      this.lastNotes = this.notes.map((n) => n.text);
       const touched = this.pending;
       const projects = this.projectsChanged;
       if (touched.length || projects) {
-        const change: BoardChange = { ids: [...new Set(touched.map((e) => e.code))], actors: [...new Set(touched.map((e) => e.actor))], projects };
+        const change: BoardChange = { rev: this.revision(), ids: [...new Set(touched.map((e) => e.code))], actors: [...new Set(touched.map((e) => e.actor))], projects };
         for (const listener of this.listeners) {
           try { listener(change); } catch { /* a listener must not break a write that already committed */ }
         }
@@ -1533,8 +1706,8 @@ export class TaskBoard {
   /** A sub task's parent: a main task that is not cancelled. */
   private resolveParent(uuid: string, actor: Actor): Card {
     const parent = this.byUuid(uuid)!;
-    if (parent.kind !== "main") throw new TaskBoardError("invalid", `${parent.code} is a sub task; sub tasks are not split further — add more sub tasks to the main task`);
-    if (parent.status === "cancelled") throw new TaskBoardError("invalid", `${parent.code} is cancelled; it takes no new sub tasks`);
+    if (parent.kind !== "main") throw new TaskBoardError("invalid", `${parent.code} is a sub task; sub tasks are not split further — add more sub tasks to the main task`, "parent_is_sub", [parent.code]);
+    if (parent.status === "cancelled") throw new TaskBoardError("invalid", `${parent.code} is cancelled; it takes no new sub tasks`, "parent_cancelled", [parent.code]);
     // A new sub task reopens a finished main task, and only a person reopens finished work.
     if (parent.status === "done" && !isPerson(actor)) throw new TaskBoardError("forbidden", `${parent.code} is done; ask the person to reopen it before adding to it`);
     return parent;
@@ -1545,9 +1718,9 @@ export class TaskBoard {
     const out: string[] = [];
     for (const ref of refs) {
       const dep = this.byUuid(ref) ?? this.getCard(ref);
-      if (dep.uuid === card.uuid) throw new TaskBoardError("invalid", "a card cannot depend on itself");
-      if (card.kind === "sub" && dep.uuid === card.parent) throw new TaskBoardError("invalid", `a sub task cannot depend on its own main task ${dep.code} (the main task already waits for it)`);
-      if (card.kind === "main" && card.uuid && dep.parent === card.uuid) throw new TaskBoardError("invalid", `a main task cannot depend on its own sub task ${dep.code} (it already waits for it)`);
+      if (dep.uuid === card.uuid) throw new TaskBoardError("invalid", "a card cannot depend on itself", "dep_self");
+      if (card.kind === "sub" && dep.uuid === card.parent) throw new TaskBoardError("invalid", `a sub task cannot depend on its own main task ${dep.code} (the main task already waits for it)`, "dep_own_main", [dep.code]);
+      if (card.kind === "main" && card.uuid && dep.parent === card.uuid) throw new TaskBoardError("invalid", `a main task cannot depend on its own sub task ${dep.code} (it already waits for it)`, "dep_own_sub", [dep.code]);
       if (!out.includes(dep.uuid)) out.push(dep.uuid);
     }
     return out;
@@ -1570,7 +1743,7 @@ export class TaskBoard {
       if (state.get(uuid) === "done") return;
       if (state.get(uuid) === "visiting") {
         const loop = [...path.slice(path.indexOf(uuid)), uuid].map((u) => this.codeOf(u)).join(" → ");
-        throw new TaskBoardError("invalid", `these dependencies would wait on each other forever: ${loop}`);
+        throw new TaskBoardError("invalid", `these dependencies would wait on each other forever: ${loop}`, "dep_cycle", [loop]);
       }
       state.set(uuid, "visiting");
       for (const next of this.waitsOn(uuid)) visit(next, [...path, uuid]);
@@ -1582,7 +1755,7 @@ export class TaskBoard {
   private checkVersion(card: Card, version: number | undefined): void {
     if (version === undefined || version === card.version) return;
     const last = this.db.prepare("SELECT actor FROM task_events WHERE task_id = ? ORDER BY id DESC LIMIT 1").get(card.uuid) as { actor: string } | undefined;
-    throw new TaskBoardError("conflict", `${card.code} changed meanwhile (you have v${version}, it is v${card.version}, last changed by ${last?.actor ?? "someone else"}); read it again first`);
+    throw new TaskBoardError("conflict", `${card.code} changed meanwhile (you have v${version}, it is v${card.version}, last changed by ${last?.actor ?? "someone else"}); read it again first`, "conflict", [card.code, last?.actor ?? "?"]);
   }
 
   private assign(card: Card, assignee: string | null, actor: Actor): void {
@@ -1601,7 +1774,7 @@ export class TaskBoard {
     for (const e of this.newComments(card)) {
       const chars = [...e.text];
       const text = chars.length > 500 ? `${chars.slice(0, 500).join("")}… (read the whole card for the rest)` : e.text;
-      this.notes.push(`${e.kind === "reject" ? "sent back" : "new comment"} (${e.author}): ${text}`);
+      this.say(e.kind === "reject" ? "sent_back" : "new_comment", [e.author, text], `${e.kind === "reject" ? "sent back" : "new comment"} (${e.author}): ${text}`);
     }
   }
 

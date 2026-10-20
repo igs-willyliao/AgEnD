@@ -2,7 +2,10 @@
 // Home lists the projects and what waits for the person; a project is a board of its main tasks by status, each able to
 // open up its sub tasks; a card opens in a dialog (fleet-task-card.js). Every write goes through /ui/tasks/* as the
 // signed-in person, under the same rules an instance's task tool meets (scheduler/task-board.ts). A change from anywhere
-// (an agent's tool, another tab) arrives as a "tasks" stream event and the board reads again.
+// (an agent's tool, another tab) arrives as a "tasks" stream event with the board's revision; the board reads again
+// when its revision moved. Over the temporary public link the board is read-only (the server refuses its writes there).
+// A card moves by drag, by Alt+arrow keys on its title, or by its dialog ("Move to…", up and down) — touch and keyboard
+// need no drag.
 import { html, useEffect, useMemo, useRef, useState } from "/assets/app-html.js";
 import { t } from "/assets/app-i18n.js";
 import { appStore, useStore } from "/assets/app-store.js";
@@ -11,7 +14,7 @@ import { Empty, ErrorState, Skeleton } from "/assets/ui-states.js";
 import { Icon } from "/assets/ui-icons.js";
 import { Menu } from "/assets/ui-menu.js";
 import { toast } from "/assets/ui-toast.js";
-import { AskHost, COLUMNS, NO_PROJECT, ProgressBar, StatusPill, UNASSIGNED, answerBlocked, boardApi, dropNeighbours, followsSubs, moveCard, projectKey, projectStats, readStored, recentlyDone, relTime, writeStored } from "./fleet-task-common.js";
+import { AskHost, COLUMNS, NO_PROJECT, ProgressBar, StatusPill, UNASSIGNED, answerBlocked, boardApi, dropNeighbours, errorText, followsSubs, moveCard, onPublicLink, projectKey, projectStats, readStored, recentlyDone, relTime, writeStored } from "./fleet-task-common.js";
 import { CardDialog } from "./fleet-task-card.js";
 
 const PROJECT_KEY = "agend_tasks_project";
@@ -25,7 +28,9 @@ const FILTER_KEY = "agend_tasks_assignee";
  */
 export function TaskBoardTab({ lease }) {
   const [state, setState] = useState(null);
-  const [version, setVersion] = useState(0);
+  // `ifMoved`: a refresh that only wants the board if its revision moved (a stream event, a reconnect).
+  const [version, setVersion] = useState({ n: 0, ifMoved: false });
+  const writable = !onPublicLink();
   const [at, setAtRaw] = useState(() => {
     const v = readStored(PROJECT_KEY, "");
     return v === "" ? null : v === NO_PROJECT ? NO_PROJECT : Number(v);
@@ -40,16 +45,24 @@ export function TaskBoardTab({ lease }) {
   const [allDone, setAllDone] = useState(false);
   const seq = useRef(0);
   const setAt = (v) => { setAtRaw(v); writeStored(PROJECT_KEY, v === null ? null : String(v)); };
-  const reload = () => setVersion((v) => v + 1);
+  const reload = (ifMoved = false) => setVersion((v) => ({ n: v.n + 1, ifMoved }));
+  const shown = useRef({ rev: null, allDone: false });
 
   useEffect(() => {
     const mine = ++seq.current;
     (async () => {
       try {
-        const r = await lease.fetch(`/ui/tasks/board${allDone ? "?done=all" : ""}`, { method: "GET", headers: { "Content-Type": "application/json" } });
+        const q = new URLSearchParams();
+        if (allDone) q.set("done", "all");
+        // The same board at the same revision is not sent again.
+        if (version.ifMoved && shown.current.rev !== null && shown.current.allDone === allDone) q.set("rev", String(shown.current.rev));
+        const qs = q.toString();
+        const r = await lease.fetch(`/ui/tasks/board${qs ? `?${qs}` : ""}`, { method: "GET", headers: { "Content-Type": "application/json" } });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const d = await r.json();
-        if (lease.current() && mine === seq.current) setState({ data: d });
+        if (!lease.current() || mine !== seq.current || d.unchanged) return;
+        shown.current = { rev: typeof d.rev === "number" ? d.rev : null, allDone };
+        setState({ data: d });
       } catch { if (lease.current() && mine === seq.current) setState((s) => (s && s.data ? s : { error: true })); }
     })();
   }, [lease, version, allDone]);
@@ -60,15 +73,17 @@ export function TaskBoardTab({ lease }) {
     if (!sub) return undefined;
     let timer = null;
     const off = sub("tasks", (change) => {
+      // A revision this page has already read (its own write, read again since) brings nothing new.
+      if (change && typeof change.rev === "number" && shown.current.rev !== null && change.rev <= shown.current.rev) return;
       const ids = Array.isArray(change && change.ids) ? change.ids : [];
       if (ids.length) {
         const now = Date.now();
         setFlashed((m) => { const next = new Map(m); for (const id of ids) next.set(id, now); return next; });
       }
       if (timer) clearTimeout(timer);
-      timer = setTimeout(() => { timer = null; reload(); setTick((n) => n + 1); }, 250);
+      timer = setTimeout(() => { timer = null; reload(true); setTick((n) => n + 1); }, 250);
     });
-    const offConn = sub("connection", (c) => { if (c === "live") reload(); });
+    const offConn = sub("connection", (c) => { if (c === "live") reload(true); });
     return () => { off(); offConn(); if (timer) clearTimeout(timer); };
   }, [lease]);
 
@@ -89,12 +104,14 @@ export function TaskBoardTab({ lease }) {
   const stats = (key) => (state.data.stats && state.data.stats[String(key)]) || projectStats(key, cards);
   const project = at === null ? null : at === NO_PROJECT ? NO_PROJECT : projects.find((p) => p.id === at) || null;
   const body = project === null
-    ? html`<${Home} cards=${cards} projects=${projects} stats=${stats} onOpenProject=${setAt} onOpen=${openCard} onDialog=${setDialog} reload=${reload} />`
-    : html`<${ProjectBoard} project=${project} cards=${cards} stats=${stats} flashed=${flashed} allDone=${allDone} onAllDone=${setAllDone} onBack=${() => setAt(null)}
+    ? html`<${Home} cards=${cards} projects=${projects} stats=${stats} writable=${writable} onOpenProject=${setAt} onOpen=${openCard} onDialog=${setDialog} reload=${reload} />`
+    : html`<${ProjectBoard} project=${project} cards=${cards} stats=${stats} flashed=${flashed} allDone=${allDone} writable=${writable} onAllDone=${setAllDone} onBack=${() => setAt(null)}
         onOpen=${openCard} onCreate=${() => setDialog({ kind: "main", project: project === NO_PROJECT ? null : project.id })} reload=${reload} />`;
   return html`<div class="tb">
+    ${writable ? null : html`<p class="tb-readonly" role="note"><${Icon} name="eye" size=${16} />${t("tasks.readOnly")}</p>`}
     ${body}
-    ${openId ? html`<${CardDialog} key=${openId} id=${openId} tick=${tick} projects=${projects} onClose=${closeCard} onOpen=${openCard} reloadBoard=${reload} />` : null}
+    ${openId ? html`<${CardDialog} key=${openId} id=${openId} tick=${tick} projects=${projects} writable=${writable} place=${writable ? placeOf(cards, openId, reload) : null}
+      onClose=${closeCard} onOpen=${openCard} reloadBoard=${reload} />` : null}
     ${dialog && dialog.kind === "main" ? html`<${CreateMainDialog} projects=${projects} project=${dialog.project} onClose=${() => setDialog(null)}
       onCreated=${(id) => { if (!lease.current()) return; setDialog(null); reload(); openCard(id); }} />` : null}
     ${dialog && dialog.kind === "project" ? html`<${ProjectDialog} project=${dialog.project} onClose=${() => setDialog(null)}
@@ -105,7 +122,7 @@ export function TaskBoardTab({ lease }) {
 
 // ── Home: the projects, and what waits for the person ─────────
 
-function Home({ cards, projects, stats, onOpenProject, onOpen, onDialog, reload }) {
+function Home({ cards, projects, stats, writable, onOpenProject, onOpen, onDialog, reload }) {
   const [showArchived, setShowArchived] = useState(false);
   const active = projects.filter((p) => !p.archived);
   const archived = projects.filter((p) => p.archived);
@@ -114,23 +131,23 @@ function Home({ cards, projects, stats, onOpenProject, onOpen, onDialog, reload 
     <div class="list-head tb-head"><span>${t("tasks.projects")}</span>
       <span class="tb-grow"></span>
       <${SearchBox} onOpen=${onOpen} />
-      <button type="button" class="btn btn-primary" onClick=${() => onDialog({ kind: "project", project: null })}><${Icon} name="plus" size=${16} />${t("tasks.newProject")}</button></div>
-    <${Waiting} cards=${cards} onOpen=${onOpen} reload=${reload} />
+      ${writable ? html`<button type="button" class="btn btn-primary" onClick=${() => onDialog({ kind: "project", project: null })}><${Icon} name="plus" size=${16} />${t("tasks.newProject")}</button>` : null}</div>
+    <${Waiting} cards=${cards} writable=${writable} onOpen=${onOpen} reload=${reload} />
     ${active.length || loose ? html`<div class="tb-projects">
-      ${active.map((p) => html`<${ProjectTile} key=${p.id} project=${p} stats=${stats(p.id)} onOpen=${() => onOpenProject(p.id)} onDialog=${onDialog} reload=${reload} />`)}
+      ${active.map((p) => html`<${ProjectTile} key=${p.id} project=${p} stats=${stats(p.id)} onOpen=${() => onOpenProject(p.id)} onDialog=${writable ? onDialog : null} reload=${reload} />`)}
       ${loose ? html`<${ProjectTile} project=${null} stats=${stats(NO_PROJECT)} onOpen=${() => onOpenProject(NO_PROJECT)} />` : null}
     </div>` : html`<${Empty} icon="tasks" title=${t("tasks.noProjects")} hint=${t("tasks.noProjectsHint")} />`}
     ${archived.length ? html`<div class="tb-archived">
       <button type="button" class="btn btn-ghost btn-sm" aria-expanded=${showArchived ? "true" : "false"} onClick=${() => setShowArchived(!showArchived)}>
         <${Icon} name="chevron" size=${14} cls=${showArchived ? "tb-chev open" : "tb-chev"} />${t("tasks.archived")} (${archived.length})</button>
-      ${showArchived ? html`<div class="tb-projects">${archived.map((p) => html`<${ProjectTile} key=${p.id} project=${p} stats=${stats(p.id)} onOpen=${() => onOpenProject(p.id)} onDialog=${onDialog} reload=${reload} />`)}</div>` : null}
+      ${showArchived ? html`<div class="tb-projects">${archived.map((p) => html`<${ProjectTile} key=${p.id} project=${p} stats=${stats(p.id)} onOpen=${() => onOpenProject(p.id)} onDialog=${writable ? onDialog : null} reload=${reload} />`)}</div>` : null}
     </div>` : null}
   </div>`;
 }
 
 function ProjectTile({ project, stats, onOpen, onDialog, reload }) {
   async function setArchived(archived) {
-    try { await boardApi.updateProject(project.id, { archived }); toast(t("tasks.projectSaved")); reload(); } catch (err) { toast(err.message, false); }
+    try { await boardApi.updateProject(project.id, { archived }); toast(t("tasks.projectSaved")); reload(); } catch (err) { toast(errorText(err), false); }
   }
   const name = project ? project.name : t("tasks.noProject");
   const desc = project ? project.description : t("tasks.noProjectDesc");
@@ -146,7 +163,7 @@ function ProjectTile({ project, stats, onOpen, onDialog, reload }) {
         ${stats.lastActivity ? html`<span class="muted">${t("tasks.lastActivity", relTime(stats.lastActivity))}</span>` : null}
       </span>
     </button>
-    ${project ? html`<${Menu} cls="tb-project-menu" items=${[
+    ${project && onDialog ? html`<${Menu} cls="tb-project-menu" items=${[
       { key: "edit", label: t("tasks.rename"), icon: "edit", onSelect: () => onDialog({ kind: "project", project }) },
       project.archived
         ? { key: "restore", label: t("tasks.restore"), icon: "restart", onSelect: () => setArchived(false) }
@@ -159,7 +176,7 @@ function ProjectTile({ project, stats, onOpen, onDialog, reload }) {
  * Cards waiting for the person: to confirm or send back, and blocked ones to answer. A card's buttons take one answer
  * at a time: claimed before the first await, so a double click sends one move.
  */
-function Waiting({ cards, onOpen, reload }) {
+function Waiting({ cards, writable, onOpen, reload }) {
   const pending = useRef(new Set());
   const [busy, setBusy] = useState(() => new Set());
   const review = cards.filter((c) => c.status === "review");
@@ -179,7 +196,7 @@ function Waiting({ cards, onOpen, reload }) {
       <button type="button" class="tb-wait-title" onClick=${() => onOpen(c.id)}><span class="tb-code">${c.id}</span> ${c.title}
         ${c.status === "blocked" && c.blockedReason ? html`<span class="tb-wait-reason">${c.blockedReason}</span>` : null}</button>
       ${c.assignee ? html`<span class="muted">${c.assignee}</span>` : null}
-      ${c.status === "review" ? html`
+      ${!writable ? null : c.status === "review" ? html`
         <button type="button" class="btn btn-primary btn-sm" disabled=${busy.has(c.id)} onClick=${() => act(() => moveCard(c, "done"), "tasks.confirmed", c)}><${Icon} name="check" size=${14} />${t("tasks.confirm")}</button>
         <button type="button" class="btn btn-sm" disabled=${busy.has(c.id)} onClick=${() => act(() => moveCard(c, "claimed"), "tasks.sentBack", c)}>${t("tasks.sendBack")}</button>`
       : html`<button type="button" class="btn btn-primary btn-sm" disabled=${busy.has(c.id)} onClick=${() => act(() => answerBlocked(c), "tasks.answered", c)}>${t("tasks.answer")}</button>`}
@@ -225,7 +242,7 @@ function SearchBox({ onOpen }) {
 
 // ── A project's board ─────────────────────────────────────
 
-function ProjectBoard({ project, cards, stats: statsOf, flashed, allDone, onAllDone, onBack, onOpen, onCreate, reload }) {
+function ProjectBoard({ project, cards, stats: statsOf, flashed, allDone, writable, onAllDone, onBack, onOpen, onCreate, reload }) {
   const { instances } = useStore(appStore);
   const [assignee, setAssigneeRaw] = useState(() => readStored(FILTER_KEY, ""));
   const [expanded, setExpanded] = useState({});
@@ -249,6 +266,17 @@ function ProjectBoard({ project, cards, stats: statsOf, flashed, allDone, onAllD
   const names = [...new Set([...instances.map((i) => i.name), ...cards.map((c) => c.assignee).filter(Boolean)])].sort();
 
   const dropping = useRef(false);
+  // A card moved from the keyboard is drawn again in its new place, and the focus it had goes with the old tile: give it
+  // back to the card's title once it is there — only while nothing else took the focus, and for a few seconds at most.
+  const refocus = useRef(null);
+  useEffect(() => {
+    const r = refocus.current;
+    if (!r) return;
+    if (Date.now() > r.until) { refocus.current = null; return; }
+    const el = document.querySelector(`[data-tile="${r.id}"] .tb-tile-title`);
+    const lost = !document.activeElement || document.activeElement === document.body;
+    if (el && lost) el.focus();
+  });
   async function drop(card, to, after, before) {
     if (dropping.current) return;
     dropping.current = true;
@@ -263,8 +291,22 @@ function ProjectBoard({ project, cards, stats: statsOf, flashed, allDone, onAllD
       const r = await moveCard(card, to);
       if (!r) return;
     }
-    if (after || before) { try { await boardApi.reorder(card.id, after, before); } catch (err) { toast(err.message, false); } }
+    if (after || before) { try { await boardApi.reorder(card.id, after, before); } catch (err) { toast(errorText(err), false); } }
     reload();
+  }
+  /** Alt+arrows on a card's title: ↑/↓ within its column, ←/→ to the status before or after (as a drop there would). */
+  function keyMove(card, e) {
+    if (!writable || !e.altKey || !["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) return;
+    e.preventDefault();
+    refocus.current = { id: card.id, until: Date.now() + 5000 };
+    const column = mains.filter((c) => c.status === card.status);
+    const i = column.findIndex((c) => c.id === card.id);
+    if (e.key === "ArrowUp" && i > 0) void drop(card, card.status, column[i - 2]?.id ?? null, column[i - 1].id);
+    else if (e.key === "ArrowDown" && i < column.length - 1) void drop(card, card.status, column[i + 1].id, column[i + 2]?.id ?? null);
+    else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      const to = COLUMNS[COLUMNS.indexOf(card.status) + (e.key === "ArrowLeft" ? -1 : 1)];
+      if (to) void drop(card, to, null, null);
+    }
   }
   const end = () => { setDrag(null); setSpot(null); };
   function over(e, status) {
@@ -305,7 +347,7 @@ function ProjectBoard({ project, cards, stats: statsOf, flashed, allDone, onAllD
         <option value=${UNASSIGNED}>${t("tasks.nobody")}</option>
         ${names.map((n) => html`<option key=${n} value=${n}>${n}</option>`)}
       </select>
-      ${archived ? null : html`<button type="button" class="btn btn-primary" onClick=${onCreate}><${Icon} name="plus" size=${16} />${t("tasks.newMain")}</button>`}
+      ${archived || !writable ? null : html`<button type="button" class="btn btn-primary" onClick=${onCreate}><${Icon} name="plus" size=${16} />${t("tasks.newMain")}</button>`}
     </div>
     ${mains.length === 0 && !drag ? html`<${Empty} icon="tasks" title=${assignee ? t("tasks.emptyFiltered") : t("tasks.emptyBoard")} hint=${assignee || archived ? undefined : t("tasks.emptyBoardHint")} />`
     : html`<div class="tb-scroll"><div class="tb-columns">
@@ -319,9 +361,10 @@ function ProjectBoard({ project, cards, stats: statsOf, flashed, allDone, onAllD
             <span class="tb-count">${list.length}</span></h3>
           ${cellItems(list, drag ? drag.id : null, line, (card, dragging) => {
             const lit = Math.max(flashed.get(card.id) || 0, ...(subsOf.get(card.id) || []).map((s) => flashed.get(s.id) || 0));
-            return html`<${Tile} key=${card.id} card=${card} dragging=${dragging} flash=${now - lit < 4000} subs=${subsOf.get(card.id)}
+            return html`<${Tile} key=${card.id} card=${card} dragging=${dragging} flash=${now - lit < 4000} subs=${subsOf.get(card.id)} writable=${writable}
               expanded=${!!expanded[card.id]} onToggleSubs=${() => setExpanded({ ...expanded, [card.id]: !expanded[card.id] })}
-              onOpen=${onOpen} onDragStart=${(e) => { e.dataTransfer.setData("text/plain", card.id); e.dataTransfer.effectAllowed = "move"; setDrag(card); }} onDragEnd=${end} />`;
+              onOpen=${onOpen} onKeyMove=${(e) => keyMove(card, e)}
+              onDragStart=${(e) => { e.dataTransfer.setData("text/plain", card.id); e.dataTransfer.effectAllowed = "move"; setDrag(card); }} onDragEnd=${end} />`;
           })}
         </section>`;
       })}
@@ -346,16 +389,17 @@ function cellItems(list, draggingId, lineAt, render) {
 }
 
 /** A card on the board: a main task shows its sub-task progress, and can open up the list. */
-function Tile({ card, dragging, flash, subs = [], expanded, onToggleSubs, onOpen, onDragStart, onDragEnd }) {
+function Tile({ card, dragging, flash, subs = [], expanded, writable, onToggleSubs, onOpen, onKeyMove, onDragStart, onDragEnd }) {
   const accepted = card.acceptance.filter((a) => a.done).length;
   const progress = card.progress;
   const hasSubs = !!progress && progress.total > 0;
   // The board carries only recently finished sub tasks; older ones are counted, not listed.
   const older = hasSubs ? progress.total - subs.length : 0;
   const replied = card.lastComment && card.lastComment.authorKind !== "person";
+  // The tile is a group, not a button: its title is the control (keyboard, screen readers); a click anywhere opens it.
   return html`<div class=${`tb-tile st-${card.status}${dragging ? " dragging" : ""}${flash ? " flash" : ""}`} data-tile=${card.id}
-    draggable="true" onDragStart=${onDragStart} onDragEnd=${onDragEnd} role="button" tabindex="0"
-    onClick=${() => onOpen(card.id)} onKeyDown=${(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(card.id); } }}>
+    draggable=${writable} onDragStart=${writable ? onDragStart : undefined} onDragEnd=${writable ? onDragEnd : undefined}
+    onClick=${() => onOpen(card.id)}>
     <div class="tb-tile-top">
       <span class="tb-code">${card.id}</span>
       ${card.priority === "urgent" || card.priority === "high" ? html`<span class=${`tb-tag p-${card.priority}`}>${t(card.priority === "urgent" ? "tasks.urgentTag" : "tasks.highTag")}</span>` : null}
@@ -363,7 +407,8 @@ function Tile({ card, dragging, flash, subs = [], expanded, onToggleSubs, onOpen
       <span class="tb-grow"></span>
       ${card.size ? html`<span class="tb-size" title=${t("tasks.size")}>${t(`tasks.size${card.size}`)}</span>` : null}
     </div>
-    <div class="tb-tile-title">${card.title}</div>
+    <button type="button" class="tb-tile-title" title=${writable ? t("tasks.tileHint") : undefined}
+      onClick=${(e) => { e.stopPropagation(); onOpen(card.id); }} onKeyDown=${onKeyMove}>${card.title}</button>
     ${card.status === "blocked" && card.blockedReason ? html`<div class="tb-tile-note st-blocked"><${Icon} name="alert" size=${13} /><span>${card.blockedReason}</span></div>` : null}
     ${hasSubs ? html`<button type="button" class="tb-tile-progress" aria-expanded=${expanded ? "true" : "false"} title=${expanded ? t("tasks.hideSubs") : t("tasks.showSubs")}
         onClick=${(e) => { e.stopPropagation(); onToggleSubs(); }}>
@@ -409,7 +454,7 @@ function CreateMainDialog({ projects, project, onClose, onCreated }) {
       });
       toast(t("tasks.created", card.id));
       onCreated(card.id);
-    } catch (err) { toast(err.message, false); setBusy(false); }
+    } catch (err) { toast(errorText(err), false); setBusy(false); }
   }
   const field = (label, input) => html`<label class="field"><span>${label}</span>${input}</label>`;
   return html`<${Dialog} title=${t("tasks.createMain")} onClose=${onClose} busy=${busy} wide
@@ -441,7 +486,7 @@ function ProjectDialog({ project, onClose, onSaved }) {
       const r = project ? await boardApi.updateProject(project.id, f) : await boardApi.createProject(f.name, f.description);
       toast(t(project ? "tasks.projectSaved" : "tasks.projectCreated"));
       onSaved(r.project);
-    } catch (err) { toast(err.message, false); setBusy(false); }
+    } catch (err) { toast(errorText(err), false); setBusy(false); }
   }
   return html`<${Dialog} title=${project ? t("tasks.rename") : t("tasks.newProject")} onClose=${onClose} busy=${busy}
     actions=${html`<button type="button" class="btn" onClick=${onClose} disabled=${busy}>${t("tasks.cancel")}</button>
@@ -450,4 +495,22 @@ function ProjectDialog({ project, onClose, onSaved }) {
       <label class="field"><span>${t("tasks.projectName")} *</span><input value=${f.name} maxlength="60" onInput=${(e) => { const v = e.target.value; setF((c) => ({ ...c, name: v })); }} required /></label>
       <label class="field"><span>${t("tasks.projectDesc")}</span><input value=${f.description} maxlength="300" onInput=${(e) => { const v = e.target.value; setF((c) => ({ ...c, description: v })); }} /></label>
     </fieldset></form></${Dialog}>`;
+}
+
+/**
+ * Up and down for the open card in its column — a main task among its project's main tasks of the same status, a sub
+ * task among its main task's — for touch and keyboard, where a drag is not there.
+ */
+function placeOf(cards, id, reload) {
+  const card = cards.find((c) => c.id === id);
+  if (!card || card.status === "cancelled") return null;
+  const column = cards.filter((c) => c.status !== "cancelled" && (card.kind === "sub"
+    ? c.kind === "sub" && c.parentId === card.parentId
+    : c.kind === "main" && projectKey(c) === projectKey(card) && c.status === card.status)).sort((a, b) => a.sort - b.sort);
+  const i = column.findIndex((c) => c.id === id);
+  const go = (after, before) => async () => { try { await boardApi.reorder(id, after, before); reload(); } catch (err) { toast(errorText(err), false); } };
+  return {
+    up: i > 0 ? go(column[i - 2]?.id ?? null, column[i - 1].id) : null,
+    down: i >= 0 && i < column.length - 1 ? go(column[i + 1].id, column[i + 2]?.id ?? null) : null,
+  };
 }

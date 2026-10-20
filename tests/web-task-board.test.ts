@@ -26,10 +26,11 @@ vi.mock("../src/logger.js", () => ({ createLogger: () => ({ info: vi.fn(), warn:
 import { FleetManager } from "../src/fleet-manager.js";
 import { handleAuthRequest, type AuthApiContext } from "../src/auth-api.js";
 import { handleWebRequest } from "../src/web-api.js";
-import { csrfTokenFor } from "../src/web-session.js";
+import { WebSessionStore, csrfTokenFor, tokenEpoch } from "../src/web-session.js";
 import { setLocale } from "../src/locale.js";
 import { SchedulerDb } from "../src/scheduler/db.js";
 import { isPublicWebRoute } from "../src/public-web-gateway.js";
+import { bindGatewayRequest } from "../src/web-request-context.js";
 
 const LOCAL_HOST = "127.0.0.1:19280", LOCAL_ORIGIN = `http://${LOCAL_HOST}`;
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
@@ -132,7 +133,7 @@ describe("1. a signed-in person runs a card from opening to confirming", () => {
     // The instance works through its task tool (the same rows, the same rules).
     const dev = { kind: "instance" as const, name: "dev-a" };
     const sub = h.db.board.getCard("S-1");
-    h.db.claimTask(sub.uuid, "dev-a");
+    h.db.claimTask(sub.uuid, "dev-a", dev);
     h.db.completeTask(sub.uuid, "sorted with a heap", dev);
 
     const board = (await web(h, "/ui/tasks/board", "GET", me)).json();
@@ -170,7 +171,7 @@ describe("2. the person is a signed-in session only", () => {
     expect((await web(h, "/ui/tasks/board", "GET", token)).status).toBe(200);
     const r = await web(h, "/ui/tasks/projects", "POST", token, { name: "Sneaky" });
     expect(r.status).toBe(403);
-    expect(r.json()).toEqual({ error: "The task board takes changes from a signed-in dashboard", code: "forbidden" });
+    expect(r.json()).toEqual({ error: "The task board takes changes from a signed-in dashboard", code: "forbidden", key: "signed_in_only" });
     expect(h.db.board.listProjects()).toEqual([]);
   });
 
@@ -206,7 +207,8 @@ describe("2. the person is a signed-in session only", () => {
     h.db.completeTask(card.uuid, "shipped", { kind: "instance", name: "dev-a" });
     const list = await h.fm.handleTaskCrudHttp("dev-a", { action: "list" }) as Array<{ id: string; status: string }>;
     expect(list.map((t) => [t.id, t.status])).toEqual([[card.uuid, "review"]]);
-    expect(await h.fm.handleTaskCrudHttp("dev-a", { action: "get", id: "M-1" })).toMatchObject({ id: card.uuid, code: "M-1", status: "review" });
+    // A card on the board reads as text (step 2: the agent's view of a card).
+    expect(await h.fm.handleTaskCrudHttp("dev-a", { action: "get", id: "M-1" })).toMatch(/^M-1 main task · Ship it \[waiting for the person\] @dev-a v3\n/);
   });
 });
 
@@ -227,16 +229,128 @@ describe("3. refusals", () => {
   });
 });
 
-describe("4. the public link carries the board", () => {
-  it("its reads and writes, exactly", () => {
+/**
+ * One request through the real web routes as the temporary public link's page (a gateway session) or a local page, with
+ * a minimal context (schedules-1724's pattern): the board's routes only need the scheduler and the fleet's config.
+ */
+function viaLink(db: SchedulerDb, method: string, path: string, body?: unknown, opts: { local?: boolean; fleetConfig?: unknown } = {}) {
+  const sessions = new WebSessionStore(), exposureId = "a".repeat(32), pub = "https://sample.trycloudflare.com", local = "http://127.0.0.1:19280";
+  const s = sessions.create({ tier: "admin", surface: opts.local ? "local" : "gateway", exposureId: opts.local ? undefined : exposureId, label: "t", tokenEpoch: tokenEpoch(TOKEN) } as never);
+  const origin = opts.local ? local : pub;
+  const headers: Record<string, string> = { host: new URL(origin).host, cookie: `${opts.local ? "" : "__Host-"}agend_session=${s.sessionId}`, origin, "sec-fetch-site": "same-origin",
+    "x-agend-csrf": csrfTokenFor(s.sessionId), "content-type": "application/json" };
+  return new Promise<{ status: number; body: any }>((resolve) => {
+    const req = Object.assign(new EventEmitter(), { method, url: path, headers, destroy: vi.fn() });
+    if (!opts.local) bindGatewayRequest(req as never, { surface: "gateway", exposureId, expectedOrigin: pub, isCurrent: () => true });
+    let status = 0;
+    const res = Object.assign(new EventEmitter(), { headersSent: false, destroyed: false, setHeader() {}, writeHead: (c: number) => { status = c; },
+      end: (t = "") => resolve({ status, body: t ? JSON.parse(String(t)) : null }) });
+    handleWebRequest(req as never, res as never, new URL(path, origin), { webToken: TOKEN, webSessions: sessions, scheduler: { db },
+      fleetConfig: opts.fleetConfig ?? { defaults: {}, instances: {} }, logger: { debug() {}, info() {}, warn() {}, error() {} } } as never);
+    if (body !== undefined) { req.emit("data", Buffer.from(JSON.stringify(body))); req.emit("end"); } else { req.emit("end"); }
+  });
+}
+function scratchDb(): SchedulerDb {
+  const dir = mkdtempSync(join(tmpdir(), "agend-task-board-link-"));
+  const db = new SchedulerDb(join(dir, "scheduler.db"));
+  rigs.push({ dir, s: {}, db });
+  return db;
+}
+const ANN = { kind: "person" as const, name: "Ann" };
+
+describe("4. the public link reads the board and changes nothing on it", () => {
+  it("its manifest: the reads; no write route of the board's own", () => {
+    for (const [method, path] of [["GET", "/ui/tasks/board"], ["GET", "/ui/tasks/search"], ["GET", "/ui/tasks/cards/M-3"]] as const) {
+      expect(isPublicWebRoute(method, path), `${method} ${path}`).toBe(true);
+    }
     for (const [method, path] of [
-      ["GET", "/ui/tasks/board"], ["GET", "/ui/tasks/search"], ["GET", "/ui/tasks/cards/M-3"],
-      ["POST", "/ui/tasks/cards"], ["POST", "/ui/tasks/cards/M-3"], ["POST", "/ui/tasks/cards/M-3/move"], ["POST", "/ui/tasks/cards/S-1/reorder"],
-      ["POST", "/ui/tasks/projects"], ["POST", "/ui/tasks/projects/2"],
-    ] as const) expect(isPublicWebRoute(method, path), `${method} ${path}`).toBe(true);
-    for (const [method, path] of [
-      ["DELETE", "/ui/tasks/cards/M-3"], ["POST", "/ui/tasks/cards/M-3/delete"], ["POST", "/ui/tasks/projects/x"],
-      ["GET", "/ui/tasks/cards/M-3/move"], ["POST", "/ui/tasks/cards/M-3/move/again"],
+      ["POST", "/ui/tasks/cards/M-3"], ["POST", "/ui/tasks/cards/M-3/move"], ["POST", "/ui/tasks/cards/S-1/reorder"], ["POST", "/ui/tasks/projects/2"],
+      ["DELETE", "/ui/tasks/cards/M-3"], ["GET", "/ui/tasks/cards/M-3/move"],
     ] as const) expect(isPublicWebRoute(method, path), `${method} ${path}`).toBe(false);
+  });
+
+  it("the handlers refuse every board write over the link (403), even where the old /ui/tasks/<id> pattern lets the path through", async () => {
+    const db = scratchDb();
+    db.board.createProject(ANN, { name: "Game" });
+    db.board.createCards(ANN, { project: "Game", cards: [{ title: "Ship it", assignee: "dev-a" }] });
+    const refused = { error: "task_board_not_over_public_link", code: "forbidden", key: "not_over_public_link" };
+    for (const [path, body] of [
+      ["/ui/tasks/cards", { title: "x" }], ["/ui/tasks/cards/M-1", { goal: "x" }], ["/ui/tasks/cards/M-1/move", { to: "done" }],
+      ["/ui/tasks/cards/M-1/reorder", { after: null }], ["/ui/tasks/projects", { name: "Other" }], ["/ui/tasks/projects/1", { archived: true }],
+    ] as const) expect(await viaLink(db, "POST", path, body), path).toEqual({ status: 403, body: refused });
+    expect(db.board.getCard("M-1")).toMatchObject({ status: "open", goal: "", version: 1 });
+    expect(db.board.listProjects(true).map((p) => [p.name, p.archived])).toEqual([["Game", false]]);
+    const read = await viaLink(db, "GET", "/ui/tasks/board");
+    expect([read.status, read.body.cards.map((c: any) => c.id)]).toEqual([200, ["M-1"]]);
+  });
+
+  it("on the old /ui/tasks/<id> route a public-link session is no person: it never confirms work waiting for one", async () => {
+    const db = scratchDb();
+    const card = db.board.createCards(ANN, { cards: [{ title: "Ship it", assignee: "dev-a" }] }).cards[0]!;
+    db.claimTask(card.uuid, "dev-a", { kind: "instance", name: "dev-a" });
+    db.completeTask(card.uuid, "shipped", { kind: "instance", name: "dev-a" });
+    const r = await viaLink(db, "POST", `/ui/tasks/${card.uuid}`, { action: "update", status: "done" });
+    expect([r.status, r.body.error]).toEqual([400, `Task "M-1" is waiting for the person's confirmation`]);
+    expect(db.board.getCard("M-1").status).toBe("review");
+    // The local page's session is the person.
+    expect((await viaLink(db, "POST", `/ui/tasks/${card.uuid}`, { action: "update", status: "done" }, { local: true })).body.status).toBe("done");
+  });
+
+  it("cards of instances kept out of sight (cross_instance_visibility: hidden) are left out over the link; the local page shows them", async () => {
+    const db = scratchDb();
+    db.board.createCards(ANN, { cards: [{ title: "Open work", assignee: "dev-a" }, { title: "Secret work", assignee: "spy" }] });
+    const fleetConfig = { defaults: {}, instances: { "dev-a": {}, spy: { cross_instance_visibility: "hidden" } } };
+    expect((await viaLink(db, "GET", "/ui/tasks/board", undefined, { fleetConfig })).body.cards.map((c: any) => c.id)).toEqual(["M-1"]);
+    expect((await viaLink(db, "GET", "/ui/tasks/cards/M-2", undefined, { fleetConfig })).status).toBe(404);
+    expect((await viaLink(db, "GET", "/ui/tasks/search?q=work", undefined, { fleetConfig })).body.results.map((r: any) => r.card.id)).toEqual(["M-1"]);
+    expect((await viaLink(db, "GET", "/ui/tasks/board", undefined, { fleetConfig, local: true })).body.cards.map((c: any) => c.id)).toEqual(["M-1", "M-2"]);
+  });
+});
+
+describe("5. revisions, refusals and notes the page can say in its language", () => {
+  it("a page with the current revision is told so; a write moves it", async () => {
+    const db = scratchDb();
+    const first = await viaLink(db, "GET", "/ui/tasks/board", undefined, { local: true });
+    expect(first.body.rev).toBe(0);
+    expect((await viaLink(db, "GET", "/ui/tasks/board?rev=0", undefined, { local: true })).body).toEqual({ rev: 0, unchanged: true });
+    db.board.createCards(ANN, { cards: [{ title: "New" }] });
+    const after = await viaLink(db, "GET", "/ui/tasks/board?rev=0", undefined, { local: true });
+    expect([after.body.rev, after.body.cards.map((c: any) => c.id)]).toEqual([1, ["M-1"]]);
+  });
+
+  it("a refusal names its key and values; a malformed card address is a 400; the old route takes only real statuses", async () => {
+    const db = scratchDb();
+    db.board.createProject(ANN, { name: "Game" });
+    const taken = await viaLink(db, "POST", "/ui/tasks/projects", { name: "game" }, { local: true });
+    expect([taken.status, taken.body.key, taken.body.args]).toEqual([400, "project_name_taken", ["game"]]);
+    expect((await viaLink(db, "GET", "/ui/tasks/cards/%E0%A4%A", undefined, { local: true })).status).toBe(400);
+    const t = db.createTask({ title: "Plain", created_by: "x" });
+    expect((await viaLink(db, "POST", `/ui/tasks/${t.id}`, { action: "update", status: "finished" }, { local: true })).status).toBe(400);
+  });
+
+  it("a write's notes come as keys and values (every sub task done: the main task waits for you)", async () => {
+    const db = scratchDb();
+    db.board.createCards(ANN, { cards: [{ title: "Leaderboard" }, { parent: "#1", title: "API" }] });
+    const r = await viaLink(db, "POST", "/ui/tasks/cards/S-1/move", { to: "done" }, { local: true });
+    expect(r.body.notes).toEqual([{ text: 'M-1 "Leaderboard": every sub task is done; it is waiting for the person\'s confirmation', key: "review_waiting", args: ["M-1", "Leaderboard"] }]);
+  });
+});
+
+describe("6. the agent learns why its work came back", () => {
+  it("sent back with a reason: the tool's get, mine and its next write all carry the reason", async () => {
+    const h = rig();
+    const me = await h.signIn("admin");
+    await web(h, "/ui/tasks/cards", "POST", me, { title: "Ship it", assignee: "dev-a" });
+    const card = h.db.board.getCard("M-1");
+    const tool = (args: Record<string, unknown>) => h.fm.handleTaskCrudHttp("dev-a", args);
+    expect(await tool({ action: "claim", id: "M-1" })).toMatchObject({ status: "claimed" });
+    expect(await tool({ action: "done", id: "M-1", result: "shipped" })).toMatchObject({ status: "review" });
+    await web(h, "/ui/tasks/cards/M-1/move", "POST", me, { to: "claimed", reason: "the changelog entry is missing", version: h.db.board.getCard("M-1").version });
+    expect(await tool({ action: "get", id: "M-1" })).toMatch(/comments \(1 new\):\n admin .* \(sent back\) \[new\]: the changelog entry is missing/);
+    expect(await tool({ action: "mine" })).toContain("sent back to you:\n M-1 Ship it — admin: the changelog entry is missing");
+    // Its next write on the card hands the reason over with the answer, and then it has seen it.
+    const next = await tool({ action: "update", id: card.uuid, result: "added the changelog entry" }) as { status: string; notes?: string[] };
+    expect(next).toMatchObject({ status: "claimed", notes: ["sent back (admin): the changelog entry is missing"] });
+    expect((await tool({ action: "update", id: card.uuid, priority: "high" }) as { notes?: string[] }).notes).toBeUndefined();
   });
 });

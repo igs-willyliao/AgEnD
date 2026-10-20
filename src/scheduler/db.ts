@@ -341,55 +341,70 @@ export class SchedulerDb {
   }
 
   /**
-   * #1335: Prune done/cancelled tasks older than `days`. Open, claimed and
-   * blocked tasks are never pruned regardless of age, and neither is any card
-   * the task board keeps (in a project, or a main task with sub tasks, or a
-   * sub task): those are the person's record of finished work. A pruned
-   * task's comments and history go with it.
-   * Cancelled tasks that appear in a live task's `depends_on` are also kept:
-   * pruning a cancelled dep would silently un-block a task whose prerequisite
-   * was explicitly cancelled (claimTask treats a missing dep as satisfied).
-   * Runs in async chunks of 500 rows with setImmediate yields (#1340 P4).
+   * #1335: Prune done/cancelled tasks older than `days`. Open, claimed,
+   * blocked and review tasks are never pruned regardless of age.
+   * The task board keeps the person's record: a card in a live project, a
+   * main task with sub tasks and a sub task are not pruned — except in an
+   * archived project, where a finished main task whose sub tasks are all
+   * finished and as old goes with them (the whole family at once).
+   * Cancelled tasks that a live task depends on are kept: pruning a
+   * cancelled dep would silently un-block a task whose prerequisite was
+   * explicitly cancelled (claimTask treats a missing dep as satisfied).
+   * A pruned task's comments and history go with it, and so does history a
+   * release without the board left behind when it pruned on its own terms.
+   * Each chunk of 500 is one immediate transaction — its pick and its delete
+   * — with a setImmediate yield between chunks (#1340 P4).
    */
   async pruneOldTasks(days = 30): Promise<number> {
     const cutoff = new Date(Date.now() - days * 24 * 60 * 60_000).toISOString();
     const CHUNK = 500;
+    const liveDeps = `SELECT DISTINCT je.value FROM tasks AS live CROSS JOIN json_each(live.depends_on) AS je
+      WHERE live.status NOT IN ('done', 'cancelled') AND live.depends_on IS NOT NULL AND live.depends_on != '[]'`;
+    // Tasks with no project and no sub tasks (the tool's own among them), and sub tasks whose main task a release
+    // without the board pruned.
+    const loose = this.db.prepare(`
+      SELECT id FROM tasks
+      WHERE status IN ('done', 'cancelled') AND updated_at < ?
+        AND ((project_id IS NULL AND parent_id IS NULL) OR (parent_id IS NOT NULL AND parent_id NOT IN (SELECT id FROM tasks)))
+        AND id NOT IN (SELECT parent_id FROM tasks WHERE parent_id IS NOT NULL)
+        AND id NOT IN (${liveDeps})
+      ORDER BY updated_at LIMIT ?`);
+    // Families with no project or in an archived one: a finished main task, its sub tasks finished and as old, none a
+    // live dependency. An active project keeps its record.
+    const families = this.db.prepare(`
+      SELECT m.id FROM tasks m
+      WHERE m.kind = 'main' AND m.status IN ('done', 'cancelled') AND m.updated_at < ?
+        AND (m.project_id IS NULL OR m.project_id IN (SELECT id FROM task_projects WHERE archived = 1))
+        AND m.id NOT IN (${liveDeps})
+        AND NOT EXISTS (SELECT 1 FROM tasks k WHERE k.parent_id = m.id
+          AND (k.status NOT IN ('done', 'cancelled') OR k.updated_at >= ? OR k.id IN (${liveDeps})))
+      ORDER BY m.updated_at LIMIT ?`);
+    const children = this.db.prepare("SELECT id FROM tasks WHERE parent_id = ?");
+    const remove = (ids: string[]) => {
+      const marks = ids.map(() => "?").join(",");
+      this.db.prepare(`DELETE FROM tasks WHERE id IN (${marks})`).run(...ids);
+      this.db.prepare(`DELETE FROM task_entries WHERE task_id IN (${marks})`).run(...ids);
+      this.db.prepare(`DELETE FROM task_events WHERE task_id IN (${marks})`).run(...ids);
+    };
     let total = 0;
-
-    for (;;) {
-      // Find a batch of eligible ids: done/cancelled, old, and not a
-      // dependency of any live (non-terminal) task.
-      const rows = this.db.prepare(`
-        SELECT id FROM tasks
-        WHERE status IN ('done', 'cancelled')
-          AND updated_at < ?
-          AND project_id IS NULL
-          AND parent_id IS NULL
-          AND id NOT IN (SELECT parent_id FROM tasks WHERE parent_id IS NOT NULL)
-          AND id NOT IN (
-            SELECT DISTINCT je.value
-            FROM tasks AS live
-            CROSS JOIN json_each(live.depends_on) AS je
-            WHERE live.status NOT IN ('done', 'cancelled')
-              AND live.depends_on IS NOT NULL
-              AND live.depends_on != '[]'
-          )
-        ORDER BY updated_at
-        LIMIT ?
-      `).all(cutoff, CHUNK) as Array<{ id: string }>;
-
-      if (rows.length === 0) break;
-      const ids = rows.map(r => r.id);
-      const placeholders = ids.map(() => "?").join(",");
-      this.db.transaction(() => {
-        this.db.prepare(`DELETE FROM tasks WHERE id IN (${placeholders})`).run(...ids);
-        this.db.prepare(`DELETE FROM task_entries WHERE task_id IN (${placeholders})`).run(...ids);
-        this.db.prepare(`DELETE FROM task_events WHERE task_id IN (${placeholders})`).run(...ids);
-      })();
-      total += rows.length;
-      if (rows.length < CHUNK) break;
-      await new Promise<void>(resolve => setImmediate(resolve));
+    for (const family of [false, true]) {
+      for (;;) {
+        const picked = this.db.transaction(() => {
+          const rows = (family ? families.all(cutoff, cutoff, CHUNK) : loose.all(cutoff, CHUNK)) as Array<{ id: string }>;
+          if (!rows.length) return { rows: 0, deleted: 0 };
+          const ids = family ? rows.flatMap((r) => [r.id, ...(children.all(r.id) as Array<{ id: string }>).map((k) => k.id)]) : rows.map((r) => r.id);
+          remove(ids);
+          return { rows: rows.length, deleted: ids.length };
+        }).immediate();
+        total += picked.deleted;
+        if (picked.rows < CHUNK) break;
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
     }
+    this.db.transaction(() => {
+      this.db.exec("DELETE FROM task_entries WHERE task_id NOT IN (SELECT id FROM tasks)");
+      this.db.exec("DELETE FROM task_events WHERE task_id NOT IN (SELECT id FROM tasks)");
+    }).immediate();
     return total;
   }
 
@@ -595,6 +610,7 @@ export class SchedulerDb {
   private toCompact(t: Task): TaskCompact {
     return {
       id: t.id,
+      code: t.code,
       title: t.title,
       status: t.status,
       assignee: t.assignee,
@@ -663,15 +679,15 @@ export class SchedulerDb {
     return [...new Set(arr.map(s => String(s).trim()).filter(s => s.length > 0))];
   }
 
-  /** `by` defaults to the task's assignee (the instance the `task` tool acts for). */
-  updateTask(id: string, params: UpdateTaskParams, by?: Actor): Task {
+  /** `by`: who changes it — the instance whose `task` tool it is, the signed-in person, or a script. */
+  updateTask(id: string, params: UpdateTaskParams, by: Actor): Task {
     const existing = this.getTask(id);
     if (!existing) throw new Error(`Task "${id}" not found`);
-    this.board.legacyUpdate(by ?? { kind: "instance", name: existing.assignee ?? existing.created_by }, id, params);
+    this.board.legacyUpdate(by, id, params);
     return this.getTask(id)!;
   }
 
-  claimTask(id: string, assignee: string, by: Actor = { kind: "instance", name: assignee }): Task {
+  claimTask(id: string, assignee: string, by: Actor): Task {
     this.board.legacyClaim(by, id, assignee);
     return this.getTask(id)!;
   }
@@ -681,10 +697,10 @@ export class SchedulerDb {
    * claim step can still mark it done. Terminal/blocked states are rejected. A card that needs the person's
    * confirmation goes to `review` instead when an instance completes it (task-board.ts legacyComplete).
    */
-  completeTask(id: string, result?: string, by?: Actor): Task {
+  completeTask(id: string, result: string | undefined, by: Actor): Task {
     const task = this.getTask(id);
     if (!task) throw new Error(`Task "${id}" not found`);
-    this.board.legacyComplete(by ?? { kind: "instance", name: task.assignee ?? task.created_by }, id, result);
+    this.board.legacyComplete(by, id, result);
     return this.getTask(id)!;
   }
 

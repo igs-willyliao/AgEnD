@@ -157,6 +157,8 @@ export interface Task {
  */
 export interface TaskCompact {
   id: string;
+  /** The task board's card number (M-3): how the dashboard and the person name it. */
+  code: string | null;
   title: string;
   status: TaskStatus;
   assignee: string | null;

@@ -44,6 +44,29 @@ register("tasks", {
     fieldgoal: "goal", fieldscope: "scope", fieldcontext: "context", fieldstate: "state", fieldresult: "result", fieldblockedReason: "blocked reason",
     fieldacceptance: "acceptance", fieldlog: "log", fieldcomment: "comment",
     loadFailed: "The board could not be read", justNow: "just now",
+    fieldtitle: "the title", fieldreason: "the reason", fieldprojectName: "the project's name", fieldprojectDescription: "the description",
+    readOnly: "The public link shows the board read-only. To change it, open the dashboard on the machine running AgEnD.",
+    tileHint: "Enter opens it · Alt+↑/↓ moves it in its column · Alt+←/→ to the next status",
+    conflictAgain: "{0} changed meanwhile (it is now {1}). Your text is kept — send it again?", sendAgain: "Send again", conflictLabel: "What you wrote",
+    "err.too_long": "{0} is too long: {1} characters, at most {2}", "err.state_lines": "State is at most {0} lines (it has {1})",
+    "err.acceptance_empty": "An acceptance item cannot be empty", "err.acceptance_max": "At most {0} acceptance items",
+    "err.acceptance_no_item": "There is no acceptance item {0} (there are {1})", "err.project_not_found": "There is no project “{0}”",
+    "err.project_name_empty": "A project needs a name", "err.project_name_digits": "A project's name cannot be only digits",
+    "err.project_name_taken": "There is already a project named “{0}”", "err.project_archived": "Project “{0}” is archived: it takes no new main tasks",
+    "err.card_not_found": "There is no card {0}", "err.title_empty": "A card needs a title", "err.scope_main_only": "Scope is for main tasks only",
+    "err.blocked_reason_not_blocked": "Only a blocked card has a blocked reason", "err.block_reason": "Blocking needs a reason: who has to answer what",
+    "err.sub_project": "A sub task follows its main task's project: move the main task", "err.already": "{0} is already {1}",
+    "err.main_cancelled": "Main task {0} is cancelled: restore it first", "err.sendback_reason": "Sending work back needs a reason",
+    "err.cannot_block": "{0} is {1}: it cannot be blocked",
+    "err.derived_move": "{0} has sub tasks and follows them: confirm it, send it back, block it or cancel it",
+    "err.unfinished_subs": "{0} still has unfinished sub tasks: {1}", "err.parent_is_sub": "{0} is a sub task: sub tasks are not split further",
+    "err.parent_cancelled": "{0} is cancelled: it takes no new sub tasks", "err.dep_self": "A card cannot depend on itself",
+    "err.dep_own_main": "A sub task cannot depend on its own main task {0}", "err.dep_own_sub": "A main task cannot depend on its own sub task {0}",
+    "err.dep_cycle": "These dependencies would wait on each other forever: {0}", "err.conflict": "{0} was changed meanwhile (last by {1})",
+    "err.signed_in_only": "The task board takes changes from a signed-in dashboard", "err.not_over_public_link": "The public link can only read the board",
+    "note.review_waiting": "{0} “{1}”: every sub task is done — it waits for your confirmation",
+    "note.back_to": "{0} has unfinished sub tasks again: it is back to {1}", "note.deps_done": "{0}'s dependencies are all done: it can start",
+    "note.deps_unmet": "Note: {0} not done yet",
   },
   "zh-TW": {
     open: "待辦", claimed: "進行中", blocked: "卡住", review: "待確認", done: "完成", cancelled: "取消",
@@ -81,6 +104,29 @@ register("tasks", {
     fieldgoal: "目標", fieldscope: "範圍", fieldcontext: "背景", fieldstate: "目前狀態", fieldresult: "產出", fieldblockedReason: "卡住原因",
     fieldacceptance: "驗收條件", fieldlog: "進度紀錄", fieldcomment: "留言",
     loadFailed: "看板讀不到", justNow: "剛剛",
+    fieldtitle: "標題", fieldreason: "原因", fieldprojectName: "專案名稱", fieldprojectDescription: "專案說明",
+    readOnly: "公開連結上的任務板只能看。要修改，請在執行 AgEnD 的那台機器上開啟儀表板。",
+    tileHint: "Enter 打開 · Alt+↑/↓ 在欄內移動 · Alt+←/→ 移到前一個／下一個狀態",
+    conflictAgain: "{0} 在這之間被改過（現在是{1}）。你寫的內容還在，要再送一次嗎？", sendAgain: "再送一次", conflictLabel: "你寫的內容",
+    "err.too_long": "{0}太長：{1} 字，上限 {2} 字", "err.state_lines": "目前狀態最多 {0} 行（現在 {1} 行）",
+    "err.acceptance_empty": "驗收條件不能是空的", "err.acceptance_max": "驗收條件最多 {0} 項",
+    "err.acceptance_no_item": "驗收條件沒有第 {0} 項（共 {1} 項）", "err.project_not_found": "找不到專案「{0}」",
+    "err.project_name_empty": "專案名稱不能是空的", "err.project_name_digits": "專案名稱不能只有數字",
+    "err.project_name_taken": "已經有專案叫「{0}」", "err.project_archived": "專案「{0}」已封存，不能再開主任務",
+    "err.card_not_found": "找不到 {0}", "err.title_empty": "標題不能是空的", "err.scope_main_only": "範圍只用在主任務",
+    "err.blocked_reason_not_blocked": "只有卡住的卡才有卡住原因", "err.block_reason": "卡住要寫原因：需要誰回答什麼",
+    "err.sub_project": "子任務跟著主任務的專案：要移就移主任務", "err.already": "{0} 已經是{1}",
+    "err.main_cancelled": "主任務 {0} 已取消：要繼續做請先恢復主任務", "err.sendback_reason": "退回要寫退回意見",
+    "err.cannot_block": "{0} 現在是{1}，不能標卡住",
+    "err.derived_move": "{0} 有子任務，狀態會跟著子任務變化：可以確認、退回、標卡住或取消",
+    "err.unfinished_subs": "{0} 還有子任務沒完成：{1}", "err.parent_is_sub": "{0} 是子任務：子任務不能再往下拆",
+    "err.parent_cancelled": "{0} 已取消：不能在底下開子任務", "err.dep_self": "卡片不能相依自己",
+    "err.dep_own_main": "子任務不能相依自己的主任務 {0}", "err.dep_own_sub": "主任務不能相依自己的子任務 {0}",
+    "err.dep_cycle": "相依會形成循環，大家會互相等待：{0}", "err.conflict": "{0} 已經被改過（最後由 {1} 修改）",
+    "err.signed_in_only": "看板只接受已登入網頁的修改", "err.not_over_public_link": "公開連結只能看看板，不能修改",
+    "note.review_waiting": "{0}「{1}」的子任務都完成了，等你確認",
+    "note.back_to": "{0} 又有沒完成的子任務，已回到{1}", "note.deps_done": "{0} 的相依都完成了，可以開始",
+    "note.deps_unmet": "提醒：{0} 還沒完成",
   },
 });
 
@@ -191,9 +237,29 @@ export async function boardCall(method, path, body) {
     const err = new Error(d.error || `HTTP ${r.status}`);
     err.status = r.status;
     err.code = d.code;
+    err.key = d.key;
+    err.args = Array.isArray(d.args) ? d.args : [];
     throw err;
   }
   return d;
+}
+
+/** Statuses and field names among a refusal's or a note's values, in the page's words. */
+function word(key, arg, i) {
+  if (typeof arg !== "string") return arg;
+  if ((key === "too_long") && i === 0) { const w = t(`tasks.field${arg}`); return w === `tasks.field${arg}` ? arg : w; }
+  if (["open", "claimed", "blocked", "review", "done", "cancelled"].includes(arg) && ["already", "cannot_block", "back_to"].includes(key)) return t(`tasks.${arg}`);
+  return arg;
+}
+
+/** A refusal in the page's language when the board named it (tasks.err.<key>), else the board's own sentence. */
+export function errorText(err) {
+  if (err && err.key) {
+    const key = `tasks.err.${err.key}`;
+    const said = t(key, ...(err.args || []).map((a, i) => word(err.key, a, i)));
+    if (said !== key) return said;
+  }
+  return err && err.message ? err.message : String(err);
 }
 const enc = encodeURIComponent;
 export const boardApi = {
@@ -208,10 +274,15 @@ export const boardApi = {
   updateProject: (id, patch) => boardCall("POST", `/ui/tasks/projects/${id}`, patch),
 };
 
-/** The board's notes are written for agents; keep the ones that read well for a person. */
+/** The notes a write brings that a person wants to hear, in the page's language (the rest are for agents). */
+const PERSON_NOTES = new Set(["review_waiting", "back_to", "deps_done", "deps_unmet"]);
 export function notesForPeople(notes) {
-  return (notes || []).filter((n) => n !== "no change" && !/^(new comment|sent back) \(/.test(n));
+  return (notes || []).filter((n) => n && typeof n === "object" && PERSON_NOTES.has(n.key))
+    .map((n) => t(`tasks.note.${n.key}`, ...(n.args || []).map((a, i) => word(n.key, a, i))));
 }
+
+/** Over the temporary public link the board is read-only (its writes are refused there). */
+export const onPublicLink = () => typeof document !== "undefined" && !!document.body && document.body.dataset.publicLink === "1";
 
 // ── Asking for a line of text (a reason, an answer) ──────────
 
@@ -252,12 +323,14 @@ export function AskHost() {
 }
 
 /**
- * Moving a card: the text a move needs (why it is blocked, why it is sent back), then the request. The version is
- * sent only when no text was typed — typed text must not be lost to an agent's write in between.
+ * Moving a card: the text a move needs (why it is blocked, why it is sent back), then the request with the version the
+ * person saw. When an agent changed the card in between (409), typed text is not lost: the card is read again and the
+ * person is asked once more, the text in place, before it is sent to the card as it now is.
  * Resolves the board's answer, or null (backed out or refused; the refusal is toasted).
  */
 export async function moveCard(card, to, extra = {}) {
-  const input = { ...extra };
+  const { again: _again, ...given } = extra;
+  const input = { ...given };
   if (to === "blocked" && !input.reason) {
     const r = await askText({ title: t("tasks.blockTitle", card.id), label: t("tasks.blockLabel"), required: true, confirmLabel: t("tasks.block") });
     if (r === null) return null;
@@ -273,13 +346,23 @@ export async function moveCard(card, to, extra = {}) {
     if (r === null) return null;
     if (r) input.reason = r;
   }
-  if (!input.reason && !input.comment) input.version = card.version;
+  input.version = card.version;
   try {
     const r = await boardApi.move(card.id, to, input);
     for (const n of notesForPeople(r.notes)) toast(n);
     return r;
   } catch (err) {
-    toast(err.message, false);
+    // Someone changed the card meanwhile: what was typed is not lost — read the card again and offer to send it there.
+    if (err.status === 409 && (input.reason || input.comment) && !extra.again) {
+      try {
+        const { card: fresh } = await boardApi.card(card.id);
+        const typed = input.reason || input.comment;
+        const again = await askText({ title: t("tasks.conflictAgain", card.id, t(`tasks.${fresh.status}`)), label: t("tasks.conflictLabel"), initial: typed, required: true, confirmLabel: t("tasks.sendAgain") });
+        if (again === null) return null;
+        return moveCard(fresh, to, { ...extra, ...(input.reason ? { reason: again } : { comment: again }), again: true });
+      } catch (e) { toast(errorText(e), false); return null; }
+    }
+    toast(errorText(err), false);
     return null;
   }
 }

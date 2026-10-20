@@ -8,7 +8,7 @@ import { appStore, useStore } from "/assets/app-store.js";
 import { Dialog } from "/assets/ui-dialog.js";
 import { Icon } from "/assets/ui-icons.js";
 import { toast } from "/assets/ui-toast.js";
-import { StatusPill, answerBlocked, askText, boardApi, followsSubs, moveCard, notesForPeople, relTime } from "./fleet-task-common.js";
+import { StatusPill, answerBlocked, askText, boardApi, errorText, followsSubs, moveCard, notesForPeople, relTime } from "./fleet-task-common.js";
 
 register("taskcard", {
   en: {
@@ -31,6 +31,7 @@ register("taskcard", {
     evCreated: "opened it", evMoved: "{0} → {1}", evAuto: " (automatic)", evAssigned: "assignee {0} → {1}", evUpdated: "changed {0}", evCommented: "commented", evLogged: "log: {0}",
     fTitle: "title", fGoal: "goal", fScope: "scope", fContext: "context", fState: "state", fResult: "result", fBlockedReason: "blocked reason", fSize: "size",
     fPriority: "priority", fNeedsReview: "needs review", fDependsOn: "dependencies", fAcceptance: "acceptance", fProjectId: "project",
+    position: "Position", moveUp: "Move up", moveDown: "Move down",
   },
   "zh-TW": {
     loading: "載入中…", missing: "找不到 {0}", version: "v{0}", copyLink: "複製這張卡的連結", linkCopied: "已複製連結",
@@ -52,6 +53,7 @@ register("taskcard", {
     evCreated: "開卡", evMoved: "{0}→{1}", evAuto: "（自動）", evAssigned: "負責人 {0}→{1}", evUpdated: "修改{0}", evCommented: "留言", evLogged: "紀錄：{0}",
     fTitle: "標題", fGoal: "目標", fScope: "範圍", fContext: "背景", fState: "目前狀態", fResult: "產出", fBlockedReason: "卡住原因", fSize: "大小",
     fPriority: "優先度", fNeedsReview: "需要確認", fDependsOn: "相依", fAcceptance: "驗收條件", fProjectId: "專案",
+    position: "位置", moveUp: "往上移", moveDown: "往下移",
   },
 });
 
@@ -73,7 +75,11 @@ export function describeEvent(ev) {
 }
 const fieldName = (k) => { const key = `taskcard.f${k[0].toUpperCase()}${k.slice(1)}`; const s = t(key); return s === key ? k : s; };
 
-export function CardDialog({ id, tick, projects, onClose, onOpen, reloadBoard }) {
+/**
+ * `writable`: false over the public link (the card is shown, nothing on it changes). `place`: up and down in its column,
+ * for touch and keyboard (null when it cannot move).
+ */
+export function CardDialog({ id, tick, projects, writable = true, place = null, onClose, onOpen, reloadBoard }) {
   const { instances } = useStore(appStore);
   const [detail, setDetail] = useState(null);
   const [missing, setMissing] = useState(false);
@@ -88,7 +94,7 @@ export function CardDialog({ id, tick, projects, onClose, onOpen, reloadBoard })
     } catch (err) {
       if (mine !== seq.current) return;
       if (err.status === 404 || err.status === 400) setMissing(true);
-      else toast(err.message, false);
+      else toast(errorText(err), false);
     }
   }
   useEffect(() => { void load(); }, [id, tick]);
@@ -103,7 +109,7 @@ export function CardDialog({ id, tick, projects, onClose, onOpen, reloadBoard })
       return "ok";
     } catch (err) {
       const conflict = err.status === 409;
-      toast(conflict ? t("taskcard.conflict", id) : err.message, false);
+      toast(conflict ? t("taskcard.conflict", id) : errorText(err), false);
       if (conflict) await load();
       return conflict ? "conflict" : "error";
     }
@@ -154,13 +160,14 @@ export function CardDialog({ id, tick, projects, onClose, onOpen, reloadBoard })
   return html`<${Dialog} title=${`${card.id} · ${t(`tasks.${card.kind}`)}`} onClose=${onClose} wide label=${`${card.id} ${card.title}`}>
     <div class="tc">
       <div class="tc-head">
-        <${InlineTitle} value=${card.title} version=${card.version} onSave=${(title, base) => save({ title }, base)} />
+        ${writable ? html`<${InlineTitle} value=${card.title} version=${card.version} onSave=${(title, base) => save({ title }, base)} />` : html`<h3 class="tc-title">${card.title}</h3>`}
         <span class="muted tc-ver">${t("taskcard.version", card.version)}</span>
         <button type="button" class="icon-btn" title=${t("taskcard.copyLink")} aria-label=${t("taskcard.copyLink")} onClick=${copyLink}><${Icon} name="copy" size=${16} /></button>
       </div>
 
       <div class="tc-actions">
         <${StatusPill} status=${card.status} />
+        ${writable ? html`
         ${card.status === "review" ? html`
           <button type="button" class="btn btn-primary btn-sm" disabled=${busy} onClick=${() => moved(() => moveCard(card, "done"))}><${Icon} name="check" size=${14} />${isMain ? t("taskcard.confirmMain") : t("tasks.confirm")}</button>
           <button type="button" class="btn btn-sm" disabled=${busy} onClick=${() => moved(() => moveCard(card, "claimed"))}>${t("tasks.sendBack")}</button>` : null}
@@ -173,62 +180,65 @@ export function CardDialog({ id, tick, projects, onClose, onOpen, reloadBoard })
         <span class="tb-grow"></span>
         ${finished
           ? html`<button type="button" class="btn btn-ghost btn-sm" disabled=${busy} onClick=${() => moved(() => moveCard(card, card.status === "done" ? "claimed" : "open"))}><${Icon} name="restart" size=${14} />${t("taskcard.reopen")}</button>`
-          : html`<button type="button" class="btn btn-ghost btn-sm danger" disabled=${busy} onClick=${() => moved(() => moveCard(card, "cancelled"))}>${t("taskcard.cancelCard")}</button>`}
+          : html`<button type="button" class="btn btn-ghost btn-sm danger" disabled=${busy} onClick=${() => moved(() => moveCard(card, "cancelled"))}>${t("taskcard.cancelCard")}</button>`}` : null}
       </div>
 
       <dl class="tc-meta">
         <dt>${t("taskcard.assignee")}</dt>
         <dd><span class="tb-who">${card.assignee || t("taskcard.nobody")}</span>
-          <select class="tb-select" value="\u0000pick" aria-label=${t("taskcard.assignee")} onChange=${(e) => { const v = e.target.value; e.target.value = "\u0000pick"; void chooseAssignee(v); }}>
+          ${writable ? html`<select class="tb-select" value="\u0000pick" aria-label=${t("taskcard.assignee")} onChange=${(e) => { const v = e.target.value; e.target.value = "\u0000pick"; void chooseAssignee(v); }}>
             <option value="\u0000pick" disabled hidden>${t("taskcard.change")}</option>
             ${card.assignee ? html`<option value="\u0000none">${t("taskcard.unassign")}</option>` : null}
             ${names.filter((n) => n !== card.assignee).map((n) => html`<option key=${n} value=${n}>${n}</option>`)}
             <option value="\u0000other">${t("taskcard.other")}</option>
-          </select></dd>
+          </select>` : null}</dd>
         ${isMain ? html`<dt>${t("taskcard.project")}</dt>
-          <dd><select class="tb-select" value=${card.projectId === null ? "" : String(card.projectId)} aria-label=${t("taskcard.project")}
+          <dd><select class="tb-select" disabled=${!writable} value=${card.projectId === null ? "" : String(card.projectId)} aria-label=${t("taskcard.project")}
             onChange=${(e) => void save({ projectId: e.target.value === "" ? null : Number(e.target.value) })}>
             <option value="">${t("tasks.noProject")}</option>
             ${projects.filter((p) => !p.archived || p.id === card.projectId).map((p) => html`<option key=${p.id} value=${String(p.id)}>${p.name}</option>`)}
           </select></dd>` : null}
         <dt>${t("taskcard.priority")}</dt>
-        <dd><select class="tb-select" value=${card.priority} aria-label=${t("taskcard.priority")} onChange=${(e) => void save({ priority: e.target.value })}>
+        <dd><select class="tb-select" disabled=${!writable} value=${card.priority} aria-label=${t("taskcard.priority")} onChange=${(e) => void save({ priority: e.target.value })}>
           ${["urgent", "high", "normal", "low"].map((p) => html`<option key=${p} value=${p}>${t(`tasks.${p}`)}</option>`)}</select></dd>
         <dt>${t("taskcard.size")}</dt>
-        <dd><select class="tb-select" value=${card.size || ""} aria-label=${t("taskcard.size")} onChange=${(e) => void save({ size: e.target.value || null })}>
+        <dd><select class="tb-select" disabled=${!writable} value=${card.size || ""} aria-label=${t("taskcard.size")} onChange=${(e) => void save({ size: e.target.value || null })}>
           <option value="">${t("tasks.sizeNone")}</option>${["S", "M", "L"].map((s) => html`<option key=${s} value=${s}>${t(`tasks.size${s}`)}</option>`)}</select></dd>
         <dt>${t("taskcard.review")}</dt>
-        <dd><label class="tb-check"><input type="checkbox" checked=${card.needsReview} onChange=${(e) => void save({ needsReview: e.target.checked })} />${t("taskcard.reviewBox")}</label></dd>
+        <dd><label class="tb-check"><input type="checkbox" disabled=${!writable} checked=${card.needsReview} onChange=${(e) => void save({ needsReview: e.target.checked })} />${t("taskcard.reviewBox")}</label></dd>
         ${parent ? html`<dt>${t("taskcard.parent")}</dt><dd><button type="button" class="tb-link" onClick=${() => onOpen(parent.id)}><span class="tb-code">${parent.id}</span> ${parent.title}</button></dd>` : null}
         <dt>${t("taskcard.deps")}</dt>
         <dd>${card.dependsOn.length ? card.dependsOn.map((d) => html`<button key=${d} type="button" class=${`tc-dep${card.unmetDeps.includes(d) ? " waiting" : ""}`}
             title=${card.unmetDeps.includes(d) ? t("taskcard.depWaiting") : t("taskcard.depDone")} onClick=${() => onOpen(d)}>${d}</button>`) : html`<span class="muted">${t("taskcard.none")}</span>`}
-          <button type="button" class="btn btn-ghost btn-sm" onClick=${editDeps}>${t("taskcard.edit")}</button></dd>
+          ${writable ? html`<button type="button" class="btn btn-ghost btn-sm" onClick=${editDeps}>${t("taskcard.edit")}</button>` : null}</dd>
+        ${place && (place.up || place.down) ? html`<dt>${t("taskcard.position")}</dt>
+          <dd><button type="button" class="btn btn-ghost btn-sm" disabled=${!place.up} aria-label=${t("taskcard.moveUp")} title=${t("taskcard.moveUp")} onClick=${place.up}><${Icon} name="up" size=${16} /></button>
+            <button type="button" class="btn btn-ghost btn-sm" disabled=${!place.down} aria-label=${t("taskcard.moveDown")} title=${t("taskcard.moveDown")} onClick=${place.down}><${Icon} name="down" size=${16} /></button></dd>` : null}
         <dt></dt>
         <dd class="muted">${t("taskcard.opened", card.createdBy, relTime(card.createdAt), relTime(card.updatedAt))}</dd>
       </dl>
 
       ${card.status === "blocked" ? html`<${Field} title=${t("taskcard.blockedReason")} tone="blocked">
-        <${EditableText} value=${card.blockedReason} limit=${LIMIT.blockedReason} version=${card.version} onSave=${(v, base) => save({ blockedReason: v }, base)} /></${Field}>` : null}
-      <${Field} title=${t("taskcard.goal")}><${EditableText} value=${card.goal} limit=${LIMIT.goal} version=${card.version} placeholder=${t("taskcard.goalHint")} onSave=${(v, base) => save({ goal: v }, base)} /></${Field}>
-      ${isMain ? html`<${Field} title=${t("taskcard.scope")}><${EditableText} value=${card.scope} limit=${LIMIT.scope} version=${card.version} placeholder=${t("taskcard.scopeHint")} onSave=${(v, base) => save({ scope: v }, base)} /></${Field}>` : null}
+        <${EditableText} readOnly=${!writable} value=${card.blockedReason} limit=${LIMIT.blockedReason} version=${card.version} onSave=${(v, base) => save({ blockedReason: v }, base)} /></${Field}>` : null}
+      <${Field} title=${t("taskcard.goal")}><${EditableText} readOnly=${!writable} value=${card.goal} limit=${LIMIT.goal} version=${card.version} placeholder=${t("taskcard.goalHint")} onSave=${(v, base) => save({ goal: v }, base)} /></${Field}>
+      ${isMain ? html`<${Field} title=${t("taskcard.scope")}><${EditableText} readOnly=${!writable} value=${card.scope} limit=${LIMIT.scope} version=${card.version} placeholder=${t("taskcard.scopeHint")} onSave=${(v, base) => save({ scope: v }, base)} /></${Field}>` : null}
       <${Field} title=${isMain ? t("taskcard.definition") : t("taskcard.acceptance")}>
-        <${Checklist} card=${card} onToggle=${(n, done) => save(done ? { check: [n] } : { uncheck: [n] })} onReplace=${(items, base) => save({ acceptance: items }, base)} /></${Field}>
-      <${Field} title=${t("taskcard.context")}><${EditableText} value=${card.context} limit=${LIMIT.context} version=${card.version} placeholder=${t("taskcard.contextHint")} onSave=${(v, base) => save({ context: v }, base)} /></${Field}>
-      <${Field} title=${t("taskcard.state")}><${EditableText} value=${card.state} limit=${LIMIT.state} version=${card.version} placeholder=${t("taskcard.stateHint")} onSave=${(v, base) => save({ state: v }, base)} /></${Field}>
-      <${Field} title=${t("taskcard.result")}><${EditableText} value=${card.result} limit=${LIMIT.result} version=${card.version} placeholder=${t("taskcard.resultHint")} onSave=${(v, base) => save({ result: v }, base)} /></${Field}>
+        <${Checklist} card=${card} readOnly=${!writable} onToggle=${(n, done) => save(done ? { check: [n] } : { uncheck: [n] })} onReplace=${(items, base) => save({ acceptance: items }, base)} /></${Field}>
+      <${Field} title=${t("taskcard.context")}><${EditableText} readOnly=${!writable} value=${card.context} limit=${LIMIT.context} version=${card.version} placeholder=${t("taskcard.contextHint")} onSave=${(v, base) => save({ context: v }, base)} /></${Field}>
+      <${Field} title=${t("taskcard.state")}><${EditableText} readOnly=${!writable} value=${card.state} limit=${LIMIT.state} version=${card.version} placeholder=${t("taskcard.stateHint")} onSave=${(v, base) => save({ state: v }, base)} /></${Field}>
+      <${Field} title=${t("taskcard.result")}><${EditableText} readOnly=${!writable} value=${card.result} limit=${LIMIT.result} version=${card.version} placeholder=${t("taskcard.resultHint")} onSave=${(v, base) => save({ result: v }, base)} /></${Field}>
 
       ${isMain ? html`<${Field} title=${t("taskcard.subs", children.length)}>
         ${children.length ? html`<ul class="tc-children">${children.map((c) => html`<li key=${c.id}><button type="button" onClick=${() => onOpen(c.id)}>
           <${StatusPill} status=${c.status} /><span class="tb-code">${c.id}</span><span class="tc-child-title">${c.title}</span><span class="tb-who">${c.assignee || ""}</span></button></li>`)}</ul>` : null}
-        ${finished ? null : html`<${QuickAdd} placeholder=${t("taskcard.quickAdd")} onAdd=${(title) => run(() => boardApi.create({ parent: card.id, title }))} />`}
+        ${finished || !writable ? null : html`<${QuickAdd} placeholder=${t("taskcard.quickAdd")} onAdd=${(title) => run(() => boardApi.create({ parent: card.id, title }))} />`}
       </${Field}>` : null}
 
       <div class="seg tc-tabs" role="tablist">
         ${[["comments", t("taskcard.tabComments", detail.comments.length)], ["log", t("taskcard.tabLog", detail.logs.length)], ["history", t("taskcard.tabHistory")]].map(([k, label]) =>
           html`<button key=${k} type="button" role="tab" aria-selected=${tab === k ? "true" : "false"} class=${`seg-item${tab === k ? " active" : ""}`} onClick=${() => setTab(k)}>${label}</button>`)}
       </div>
-      ${tab === "comments" ? html`<${Comments} entries=${detail.comments} card=${card} onSend=${(text) => run(() => boardApi.update(card.id, { comment: text }))} />` : null}
+      ${tab === "comments" ? html`<${Comments} entries=${detail.comments} card=${card} writable=${writable} onSend=${(text) => run(() => boardApi.update(card.id, { comment: text }))} />` : null}
       ${tab === "log" ? html`<ul class="tc-feed">${detail.logs.length ? detail.logs.map((e) => html`<li key=${e.id}><span class="muted">${relTime(e.at)}</span> <b>${e.author}</b> ${e.text}</li>`)
         : html`<li class="muted">${t("taskcard.noLog")}</li>`}</ul>` : null}
       ${tab === "history" ? html`<ul class="tc-feed">${[...detail.history].reverse().map((ev) => html`<li key=${ev.id}><span class="muted">${relTime(ev.at)}</span> <b>${ev.actor}</b> ${describeEvent(ev)}</li>`)}</ul>` : null}
@@ -288,11 +298,12 @@ function InlineTitle({ value, version, onSave }) {
     onKeyDown=${(e) => { if (escapeEdit(e, () => setDraft(null))) return; if (e.key === "Enter") { e.preventDefault(); void commit(); } }} />`;
 }
 
-function EditableText({ value, limit, placeholder, version, onSave }) {
+function EditableText({ value, limit, placeholder, version, readOnly = false, onSave }) {
   const [draft, setDraft] = useState(null);
   const [saving, setSaving] = useState(false);
   const base = useEditBase(version);
   const ref = useAutoFocus(draft !== null);
+  if (readOnly) return html`<p class=${`tc-text${value ? "" : " empty"}`}>${value || "—"}</p>`;
   if (draft === null) {
     return html`<button type="button" class=${`tc-text${value ? "" : " empty"}`} title=${t("taskcard.clickToEdit")} onClick=${() => { setDraft(value); base.start(); }}>${value || placeholder || t("taskcard.empty")}</button>`;
   }
@@ -318,7 +329,7 @@ function EditableText({ value, limit, placeholder, version, onSave }) {
     </div></div>`;
 }
 
-function Checklist({ card, onToggle, onReplace }) {
+function Checklist({ card, readOnly = false, onToggle, onReplace }) {
   const [draft, setDraft] = useState(null);
   // One tick at a time: each sends the version it saw, so a second tick before the first is saved would be refused.
   // The tick being saved shows as asked meanwhile (the box does not flick back until the card is read again).
@@ -346,10 +357,10 @@ function Checklist({ card, onToggle, onReplace }) {
         <button type="button" class="btn btn-primary btn-sm" disabled=${items.length > LIMIT.acceptanceItems} onClick=${save}>${t("taskcard.save")}</button>
       </div></div>`;
   }
-  if (!card.acceptance.length) return html`<button type="button" class="tc-text empty" onClick=${() => start("")}>${t("taskcard.checklistEmpty")}</button>`;
+  if (!card.acceptance.length) return readOnly ? html`<p class="tc-text empty">—</p>` : html`<button type="button" class="tc-text empty" onClick=${() => start("")}>${t("taskcard.checklistEmpty")}</button>`;
   return html`<ul class="tc-checklist">${card.acceptance.map((a, i) => html`<li key=${`${i}-${a.text}`}><label class="tb-check">
-      <input type="checkbox" checked=${ticking && ticking.n === i + 1 ? ticking.done : a.done} disabled=${!!ticking} onChange=${() => void tick(i + 1, !a.done)} /><span class=${a.done ? "done" : ""}>${a.text}</span></label></li>`)}</ul>
-    <button type="button" class="btn btn-ghost btn-sm" onClick=${() => start(card.acceptance.map((a) => a.text).join("\n"))}>${t("taskcard.editList")}</button>`;
+      <input type="checkbox" checked=${ticking && ticking.n === i + 1 ? ticking.done : a.done} disabled=${readOnly || !!ticking} onChange=${() => void tick(i + 1, !a.done)} /><span class=${a.done ? "done" : ""}>${a.text}</span></label></li>`)}</ul>
+    ${readOnly ? null : html`<button type="button" class="btn btn-ghost btn-sm" onClick=${() => start(card.acceptance.map((a) => a.text).join("\n"))}>${t("taskcard.editList")}</button>`}`;
 }
 
 function QuickAdd({ placeholder, onAdd }) {
@@ -366,7 +377,7 @@ function QuickAdd({ placeholder, onAdd }) {
     }} />`;
 }
 
-function Comments({ entries, card, onSend }) {
+function Comments({ entries, card, writable = true, onSend }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const busy = useRef(false);
@@ -386,10 +397,10 @@ function Comments({ entries, card, onSend }) {
         ${e.kind === "approve" ? html`<span class="tb-tag st-done">${t("taskcard.approveTag")}</span>` : null}
         <span class="muted">${relTime(e.at)}</span></div>
       <div class="tc-comment-body">${e.text}</div></div>`)}
-    <div class="tc-composer">
+    ${writable ? html`<div class="tc-composer">
       <textarea rows="2" value=${text} placeholder=${card.assignee ? t("taskcard.commentTo", card.assignee) : t("taskcard.commentHint")} aria-label=${t("taskcard.commentHint")}
         onInput=${(e) => setText(e.target.value)}
         onKeyDown=${(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); e.currentTarget.blur(); return; } if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void send(); } }}></textarea>
       <button type="button" class="btn btn-primary btn-sm" disabled=${sending || !text.trim()} onClick=${send}>${t("taskcard.send")}</button>
-    </div></div>`;
+    </div>` : null}</div>`;
 }

@@ -21,6 +21,7 @@ import { EFFECT_WIRE_LIMIT } from "./web-effect-upload.js";
 import type { ThemeStore } from "./web-theme-store.js";
 import type { WebAppearance } from "./web-appearance.js";
 import { gatewayRequestContext } from "./web-request-context.js";
+import { crossInstanceVisibility } from "./cross-instance-notice.js";
 import { permitWebContinuation } from "./web-continuation.js";
 /**
  * Web UI HTTP API handler.
@@ -79,7 +80,8 @@ const TaskUpdateSchema = z.object({
   action: z.enum(["claim", "complete", "update"]).optional(),
   assignee: z.string().max(128).optional(),
   result: z.string().max(MAX_TEXT).optional(),
-  status: z.string().max(64).optional(),
+  // A status the task board knows: each carries its rules now (scheduler/task-board.ts).
+  status: z.enum(CARD_STATUSES).optional(),
   title: z.string().max(512).optional(),
   description: z.string().max(MAX_TEXT).optional(),
   priority: z.string().max(64).optional(),
@@ -934,21 +936,26 @@ function webPersonOr401(req: IncomingMessage, res: ServerResponse, url: URL, ctx
   return p;
 }
 /**
- * Who a dashboard request acts as on the task board. The person only through a signed-in session: the header token is
- * the CLI's or a script's, and any agent on this machine can read the token file — so a token request never stands for
- * the person's confirmation (it is a script, held to the rules an instance is held to).
+ * Who a dashboard request acts as on the task board. The person only through a signed-in local session: the header
+ * token is the CLI's or a script's (any agent on this machine can read the token file), and the temporary public link
+ * carries no verified authority (docs/web-dashboard.md) — either is a script, held to the rules an instance is held to,
+ * so neither confirms work waiting for the person.
  */
 function boardActor(req: IncomingMessage, url: URL, ctx: WebApiContext, p: WebPerson): BoardActor {
+  if (gatewayRequestContext(req)) return { kind: "script", name: "public-link" };
   const v = evaluateWebRequest(req as unknown as WebGateRequest, url, ctx.webToken ?? null, ctx.webSessions, { touch: false });
   return v.kind === "allow" && v.via === "session" ? { kind: "person", name: p.name } : { kind: "script", name: "web-token" };
 }
 
-/** A board refusal as the dashboard reads it: the board's own sentence, its code, and the status that fits. */
+/**
+ * A board refusal as the dashboard reads it: the board's sentence, its code and the status that fits, and — when the
+ * person can meet it — the key and values the page says it with in its own language.
+ */
 function boardError(res: ServerResponse, err: unknown): void {
   if (res.headersSent) return;
   if (err instanceof TaskBoardError) {
     const status = err.code === "not_found" ? 404 : err.code === "forbidden" ? 403 : err.code === "conflict" ? 409 : 400;
-    json(res, status, { error: err.message, code: err.code });
+    json(res, status, { error: err.message, code: err.code, ...(err.key ? { key: err.key, args: err.args } : {}) });
     return;
   }
   json(res, 400, { error: (err as Error).message });
@@ -972,7 +979,7 @@ function boardWrite<T>(
       const person = webPersonOr401(req, res, url, ctx);
       if (!person) return;
       const actor = boardActor(req, url, ctx, person);
-      if (actor.kind !== "person") { json(res, 403, { error: "The task board takes changes from a signed-in dashboard", code: "forbidden" }); return; }
+      if (actor.kind !== "person") { json(res, 403, { error: "The task board takes changes from a signed-in dashboard", code: "forbidden", key: "signed_in_only" }); return; }
       json(res, 200, write(parsed, actor));
     } catch (err) {
       boardError(res, err);
@@ -1998,17 +2005,29 @@ export function handleWebRequest(
   if (path === "/ui/tasks/board" || path === "/ui/tasks/search" || path.startsWith("/ui/tasks/cards") || path.startsWith("/ui/tasks/projects")) {
     const board = ctx.scheduler?.db.board;
     if (!board) { json(res, 503, { error: "The task board is not available" }); return true; }
+    // The temporary public link reads the board and changes nothing on it: confirming, sending back, cancelling and
+    // assigning are the person's authority, which the public link never carries (docs/web-dashboard.md).
+    const gateway = gatewayRequestContext(req);
+    if (gateway && method !== "GET") { json(res, 403, { error: "task_board_not_over_public_link", code: "forbidden", key: "not_over_public_link" }); return true; }
+    // …nor shows the cards of instances kept out of sight (cross_instance_visibility: hidden).
+    const fleet = ctx.fleetConfig as Parameters<typeof crossInstanceVisibility>[0];
+    const hidden = (c: { assignee: string | null; createdBy: string }) => !!gateway
+      && [c.assignee, c.createdBy].some((n) => !!n && !!ctx.fleetConfig?.instances?.[n] && crossInstanceVisibility(fleet, n) === "hidden");
     const card = /^\/ui\/tasks\/cards\/([^/]+)(?:\/(move|reorder))?$/.exec(path);
     const project = /^\/ui\/tasks\/projects\/(\d+)$/.exec(path);
     try {
+      const ref = card ? decodeURIComponent(card[1]!) : "";
       if (method === "GET" && path === "/ui/tasks/board") {
-        const cards = board.boardCards(undefined, url.searchParams.get("done") === "all");
-        json(res, 200, { cards: board.views(cards), projects: board.listProjects(true), stats: board.projectStats() });
+        // A page that has this revision already is told so, not sent the board again.
+        const rev = board.revision();
+        if (url.searchParams.get("rev") === String(rev)) { json(res, 200, { rev, unchanged: true }); return true; }
+        const cards = board.boardCards(undefined, url.searchParams.get("done") === "all").filter((c) => !hidden(c));
+        json(res, 200, { rev, cards: board.views(cards), projects: board.listProjects(true), stats: board.projectStats() });
         return true;
       }
       if (method === "GET" && path === "/ui/tasks/search") {
         const names = new Map(board.listProjects(true).map((p) => [p.id, p.name]));
-        const hits = board.search(url.searchParams.get("q") ?? "", Number(url.searchParams.get("limit")) || 20);
+        const hits = board.search(url.searchParams.get("q") ?? "", Number(url.searchParams.get("limit")) || 20).filter((h) => !hidden(h.card));
         const views = board.views(hits.map((h) => h.card));
         const results = hits.map(({ card: c, match }, i) => ({
           card: views[i],
@@ -2020,43 +2039,46 @@ export function handleWebRequest(
         return true;
       }
       if (method === "GET" && card && !card[2]) {
-        json(res, 200, board.detail(decodeURIComponent(card[1]!)));
+        const found = board.getCard(ref);
+        if (hidden(found)) { json(res, 404, { error: "no such card", code: "not_found" }); return true; }
+        json(res, 200, board.detail(ref));
+        return true;
+      }
+      if (method === "POST" && path === "/ui/tasks/cards") {
+        boardWrite(req, res, url, ctx, board, CardCreateSchema, (spec, person) => {
+          const { cards, said } = board.createCards(person, { cards: [spec] });
+          return { card: board.view(cards[0]!), notes: said };
+        });
+        return true;
+      }
+      if (method === "POST" && card) {
+        if (card[2] === "move") {
+          boardWrite(req, res, url, ctx, board, CardMoveSchema, ({ to, ...move }, person) => {
+            const { card: moved, said } = board.moveCard(person, ref, to, move);
+            return { card: board.view(moved), notes: said };
+          });
+        } else if (card[2] === "reorder") {
+          boardWrite(req, res, url, ctx, board, CardReorderSchema, ({ after, before }, person) => ({ card: board.view(board.reorder(person, ref, after ?? null, before ?? null)) }));
+        } else {
+          boardWrite(req, res, url, ctx, board, CardPatchSchema, (patch, person) => {
+            const { card: updated, said } = board.updateCard(person, ref, patch);
+            return { card: board.view(updated), notes: said };
+          });
+        }
+        return true;
+      }
+      if (method === "POST" && path === "/ui/tasks/projects") {
+        boardWrite(req, res, url, ctx, board, ProjectCreateSchema, (input, person) => ({ project: board.createProject(person, input) }));
+        return true;
+      }
+      if (method === "POST" && project) {
+        boardWrite(req, res, url, ctx, board, ProjectPatchSchema, (patch, person) => ({ project: board.updateProject(person, Number(project[1]), patch) }));
         return true;
       }
     } catch (err) {
+      // A malformed %-escape in the card's address is the caller's mistake, not the server's.
+      if (err instanceof URIError) { json(res, 400, { error: "bad card reference", code: "invalid" }); return true; }
       boardError(res, err);
-      return true;
-    }
-    if (method === "POST" && path === "/ui/tasks/cards") {
-      boardWrite(req, res, url, ctx, board, CardCreateSchema, (spec, person) => {
-        const { cards, notes } = board.createCards(person, { cards: [spec] });
-        return { card: board.view(cards[0]!), notes };
-      });
-      return true;
-    }
-    if (method === "POST" && card) {
-      const ref = decodeURIComponent(card[1]!);
-      if (card[2] === "move") {
-        boardWrite(req, res, url, ctx, board, CardMoveSchema, ({ to, ...move }, person) => {
-          const { card: moved, notes } = board.moveCard(person, ref, to, move);
-          return { card: board.view(moved), notes };
-        });
-      } else if (card[2] === "reorder") {
-        boardWrite(req, res, url, ctx, board, CardReorderSchema, ({ after, before }, person) => ({ card: board.view(board.reorder(person, ref, after ?? null, before ?? null)) }));
-      } else {
-        boardWrite(req, res, url, ctx, board, CardPatchSchema, (patch, person) => {
-          const { card: updated, notes } = board.updateCard(person, ref, patch);
-          return { card: board.view(updated), notes };
-        });
-      }
-      return true;
-    }
-    if (method === "POST" && path === "/ui/tasks/projects") {
-      boardWrite(req, res, url, ctx, board, ProjectCreateSchema, (input, person) => ({ project: board.createProject(person, input) }));
-      return true;
-    }
-    if (method === "POST" && project) {
-      boardWrite(req, res, url, ctx, board, ProjectPatchSchema, (patch, person) => ({ project: board.updateProject(person, Number(project[1]), patch) }));
       return true;
     }
     json(res, 404, { error: "Not found" });

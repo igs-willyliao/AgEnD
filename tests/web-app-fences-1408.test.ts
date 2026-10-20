@@ -45,6 +45,7 @@ afterAll(() => { p.restore(); delete (globalThis as any).fetch; });
 beforeEach(async () => {
   await p.unmount();
   requests.length = 0;
+  (globalThis as any).localStorage.removeItem("agend_tasks_project");     // the board opens on Home, not the last project
   handler = (path) => path.startsWith("/ui/history") ? { messages: [] } : {};
   app.applyStatus({ uptime: 1, instances: [
     { name: "alpha", status: "running", state: "idle", execution_state: "idle" },
@@ -236,6 +237,94 @@ describe("3a. one answer per card at a time", () => {
     expect(p.root.querySelector(".tb-wait-row .btn-primary").disabled).toBe(true);
     move.open(); await settle(8);
     expect(requests.filter(r => r.startsWith("POST /ui/tasks/cards/M-1/move"))).toHaveLength(1);
+  });
+});
+
+describe("3c. the public link shows the board and changes nothing (the server refuses it too)", () => {
+  afterEach(() => { (globalThis as any).document.body.removeAttribute("data-public-link"); });
+
+  it("a read-only note; no Confirm or Send back, no New project; on a project, no New main task and no dragging", async () => {
+    (globalThis as any).document.body.dataset.publicLink = "1";
+    const open = { ...REVIEW_CARD, id: "M-2", uuid: "u2", status: "open", needsReview: false };
+    handler = (path) => (path === "/ui/tasks/board" ? { ...BOARD, cards: [REVIEW_CARD, open] } : {});
+    await p.mount(h(fleet.FleetPanel, { route: { panel: "fleet", tab: "tasks" }, navKey: "fleet:tasks|link|en" }));
+    await settle(6);
+    expect(p.root.querySelector(".tb-readonly")?.textContent).toContain("read-only");
+    expect(p.root.querySelector(".tb-wait-row")).not.toBeNull();                 // the waiting card is listed…
+    expect(p.root.querySelectorAll(".tb-wait-row .btn")).toHaveLength(0);         // …with nothing to answer it with
+    expect(p.root.querySelector(".list-head .btn")).toBeNull();
+    p.root.querySelector(".tb-project-open").click(); await settle(6);
+    expect(p.root.querySelectorAll(".tb-tile")).toHaveLength(2);
+    expect([...p.root.querySelectorAll(".tb-tile")].map((el: any) => el.getAttribute("draggable"))).toEqual(["false", "false"]);
+    expect([...p.root.querySelectorAll(".btn")].some((b: any) => b.textContent.includes("New main task"))).toBe(false);
+    fire(p.root.querySelector(".tb-tile-title"), "keydown", { key: "ArrowRight", altKey: true }); await settle(4);
+    expect(requests.filter(r => r.startsWith("POST"))).toEqual([]);
+  });
+});
+
+describe("3d. a tile from the keyboard: its title is the button; Alt+arrows move it", () => {
+  const A = { ...REVIEW_CARD, id: "M-1", status: "open", needsReview: false, sort: 1 };
+  const B = { ...REVIEW_CARD, id: "M-2", uuid: "u2", title: "Two", status: "open", needsReview: false, sort: 2 };
+  beforeEach(() => {
+    handler = (path, init) => {
+      if (path === "/ui/tasks/board") return { projects: [PROJECT], cards: [A, B] };
+      if (init.method === "POST" && path.endsWith("/move")) return { card: { ...A, status: "claimed" }, notes: [] };
+      if (init.method === "POST" && path.endsWith("/reorder")) return { card: A };
+      return {};
+    };
+  });
+
+  it("the tile is a group with a real button in it, not a div acting as one", async () => {
+    await p.mount(h(fleet.FleetPanel, { route: { panel: "fleet", tab: "tasks" }, navKey: "fleet:tasks|kb1|en" }));
+    await settle(6);
+    p.root.querySelector(".tb-project-open").click(); await settle(6);
+    const tile = p.root.querySelector(".tb-tile");
+    expect(tile.getAttribute("role")).toBeNull();
+    expect(tile.getAttribute("tabindex")).toBeNull();
+    expect(tile.querySelector(".tb-tile-title").tagName.toLowerCase()).toBe("button");
+  });
+
+  it("Alt+→ moves the card to the next status with the version seen; Alt+↓ puts it after the next card; a plain arrow does nothing", async () => {
+    await p.mount(h(fleet.FleetPanel, { route: { panel: "fleet", tab: "tasks" }, navKey: "fleet:tasks|kb2|en" }));
+    await settle(6);
+    p.root.querySelector(".tb-project-open").click(); await settle(6);
+    const title = () => p.root.querySelector('[data-tile="M-1"] .tb-tile-title');
+    fire(title(), "keydown", { key: "ArrowRight" }); await settle(4);
+    expect(requests.filter(r => r.startsWith("POST"))).toEqual([]);
+    fire(title(), "keydown", { key: "ArrowRight", altKey: true }); await settle(6);
+    expect(requests.filter(r => r.startsWith("POST"))).toEqual(['POST /ui/tasks/cards/M-1/move {"to":"claimed","version":3}']);
+    requests.length = 0;
+    fire(title(), "keydown", { key: "ArrowDown", altKey: true }); await settle(6);
+    expect(requests.filter(r => r.startsWith("POST"))).toEqual(['POST /ui/tasks/cards/M-1/reorder {"after":"M-2","before":null}']);
+  });
+});
+
+describe("3e. a send-back that meets an agent's write keeps what the person typed", () => {
+  it("409: the card is read again, the reason is offered again as typed, and sent with the new version", async () => {
+    let moves = 0;
+    handler = (path, init) => {
+      if (path === "/ui/tasks/board") return BOARD;
+      if (path === "/ui/tasks/cards/M-1" && (init.method ?? "GET") === "GET") return { card: { ...REVIEW_CARD, version: 5 } };
+      if (path === "/ui/tasks/cards/M-1/move") {
+        moves++;
+        return moves === 1 ? { __status: 409, error: "M-1 changed meanwhile", code: "conflict", key: "conflict", args: ["M-1"] } : { card: { ...REVIEW_CARD, status: "claimed" }, notes: [] };
+      }
+      return {};
+    };
+    await p.mount(h(fleet.FleetPanel, { route: { panel: "fleet", tab: "tasks" }, navKey: "fleet:tasks|409|en" }));
+    await settle(6);
+    [...p.root.querySelectorAll(".tb-wait-row .btn")].find((b: any) => b.textContent === "Send back")!.click(); await settle(4);
+    const reason = p.root.querySelector("dialog textarea");
+    reason.value = "the login page 500s"; fire(reason, "input"); await settle();
+    p.root.querySelector("dialog .btn-primary").click(); await settle(8);
+    // Asked again, with the text in place.
+    expect(p.root.querySelector("dialog textarea").value).toBe("the login page 500s");
+    p.root.querySelector("dialog .btn-primary").click(); await settle(8);
+    expect(requests.filter(r => r.startsWith("POST /ui/tasks/cards/M-1/move"))).toEqual([
+      'POST /ui/tasks/cards/M-1/move {"to":"claimed","reason":"the login page 500s","version":3}',
+      'POST /ui/tasks/cards/M-1/move {"to":"claimed","reason":"the login page 500s","version":5}',
+    ]);
+    expect(p.root.querySelector("dialog")).toBeNull();
   });
 });
 

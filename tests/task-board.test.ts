@@ -343,6 +343,22 @@ describe("6. editing", () => {
     expect(board.getCard(c.code).sort).toBeLessThan(board.getCard(b.code).sort);
     expect(board.getCard(c.code).version).toBe(1);
   });
+
+  it("placing cards between the same two again and again spreads the column out when the numbers run out", () => {
+    const { board } = withProject();
+    const a = main(board, ANN), b = main(board, ANN);
+    const placed: string[] = [];
+    for (let i = 0; i < 30; i++) {
+      const c = main(board, ANN);
+      board.reorder(ANN, c.code, a.code, placed[0] ?? b.code);
+      placed.unshift(c.code);
+    }
+    const column = board.boardCards().sort((x, y) => x.sort - y.sort);
+    expect(column.map((c) => c.code)).toEqual([a.code, ...placed, b.code]);
+    // Thirty halvings of a gap of 1 would leave 1e-9 between neighbours; spread out, it never falls under 1e-6.
+    const gaps = column.slice(1).map((c, i) => c.sort - column[i]!.sort);
+    expect(Math.min(...gaps)).toBeGreaterThan(1e-6);
+  });
 });
 
 describe("7. comments the assignee has not seen", () => {
@@ -393,10 +409,10 @@ describe("9. change notifications and search", () => {
     expect(() => board.moveCard(DEV, s.code, "done")).toThrow();
     board.createProject(ANN, { name: "Other" });
     expect(heard).toEqual([
-      { ids: ["M-1"], actors: ["dev-a"], projects: false },
-      { ids: ["S-1"], actors: ["dev-a"], projects: false },
-      { ids: ["S-1", "M-1"], actors: ["dev-a"], projects: false },
-      { ids: [], actors: [], projects: true },
+      { rev: 2, ids: ["M-1"], actors: ["dev-a"], projects: false },
+      { rev: 3, ids: ["S-1"], actors: ["dev-a"], projects: false },
+      { rev: 4, ids: ["S-1", "M-1"], actors: ["dev-a"], projects: false },
+      { rev: 5, ids: [], actors: [], projects: true },
     ]);
   });
 
@@ -457,7 +473,7 @@ describe("10. the fleet's `task` tool on the same rows", () => {
   it("claim and done move the card like the board does: versions, history, timestamps", () => {
     const { db, board } = open();
     const t = db.createTask({ title: "Fix bug", created_by: "lead" });
-    db.claimTask(t.id, "dev-a");
+    db.claimTask(t.id, "dev-a", DEV);
     db.completeTask(t.id, "patched", { kind: "instance", name: "dev-a" });
     const card = board.getCard(t.id);
     expect(card).toMatchObject({ status: "done", assignee: "dev-a", result: "patched", version: 3 });
@@ -469,11 +485,14 @@ describe("10. the fleet's `task` tool on the same rows", () => {
   it("the review gate holds for the tool: done becomes review, and only a person takes it out of review to done", () => {
     const { db, board } = withProject();
     const card = main(board, ANN, { assignee: "dev-a" });
-    db.claimTask(card.uuid, "dev-a");
+    db.claimTask(card.uuid, "dev-a", DEV);
     expect(db.completeTask(card.uuid, "r", DEV).status).toBe("review");
     expect(() => db.updateTask(card.uuid, { status: "done" }, DEV)).toThrow(/waiting for the person's confirmation/);
     expect(() => db.updateTask(card.uuid, { status: "done" }, SCRIPT)).toThrow(/waiting for the person's confirmation/);   // a token script is no person
-    db.updateTask(card.uuid, { status: "claimed" }, DEV);
+    // Taking it back out of the person's queue says why (the tool's update has no reason to give).
+    expect(() => db.updateTask(card.uuid, { status: "claimed" }, DEV)).toThrow(/taking a card back from review needs a reason/);
+    board.moveCard(DEV, card.code, "claimed", { reason: "found a bug" });
+    expect(board.detail(card.code).comments.map((e) => e.text)).toEqual(["withdrawn from review: found a bug"]);
     expect(db.updateTask(card.uuid, { status: "done" }, DEV).status).toBe("review");
     expect(db.updateTask(card.uuid, { status: "done" }, ANN).status).toBe("done");
   });
@@ -482,7 +501,7 @@ describe("10. the fleet's `task` tool on the same rows", () => {
     const { db, board } = withProject();
     const m = main(board, ANN);
     const s = sub(board, ANN, m.code, { assignee: "dev-a" });
-    db.claimTask(s.uuid, "dev-a");
+    db.claimTask(s.uuid, "dev-a", DEV);
     expect(board.getCard(m.code).status).toBe("claimed");
     db.completeTask(s.uuid, "r", DEV);
     expect(board.getCard(m.code).status).toBe("review");
@@ -501,8 +520,8 @@ describe("10. the fleet's `task` tool on the same rows", () => {
     expect(() => db.updateTask(theirs.uuid, { status: "cancelled" }, DEV)).toThrow(/cancel only the cards it opened/);
     expect(() => db.updateTask(theirs.uuid, { assignee: "dev-a" }, DEV)).toThrow(/you cannot reassign it/);
     expect(() => db.updateTask(theirs.uuid, { result: "mine" }, DEV)).toThrow(/you can only comment/);
-    expect(() => db.claimTask(theirs.uuid, "dev-a")).toThrow(/assigned to dev-b; you cannot take it/);
-    expect(() => db.claimTask(step.uuid, "dev-a")).toThrow(/waits for M-3/);           // its main task's dependency
+    expect(() => db.claimTask(theirs.uuid, "dev-a", DEV)).toThrow(/assigned to dev-b; you cannot take it/);
+    expect(() => db.claimTask(step.uuid, "dev-a", DEV)).toThrow(/waits for M-3/);           // its main task's dependency
     expect(() => db.completeTask(theirs.uuid, "r", DEV)).toThrow(/assigned to dev-b/);
     expect(board.getCard(theirs.code)).toMatchObject({ status: "open", assignee: "dev-b" });
     // A person, and the tool's own tasks: as before.
@@ -510,17 +529,17 @@ describe("10. the fleet's `task` tool on the same rows", () => {
     const loose = db.createTask({ title: "Loose", created_by: "lead", assignee: "dev-b" });
     expect(db.updateTask(loose.id, { status: "cancelled" }, DEV).status).toBe("cancelled");
     expect(db.updateTask(loose.id, { status: "open" }, DEV).status).toBe("open");
-    expect(db.claimTask(loose.id, "dev-a").assignee).toBe("dev-a");
+    expect(db.claimTask(loose.id, "dev-a", DEV).assignee).toBe("dev-a");
   });
 
   it("errors keep their wording", () => {
     const { db } = open();
     const a = db.createTask({ title: "A", created_by: "x" });
     const b = db.createTask({ title: "B", created_by: "x", depends_on: [a.id] });
-    expect(() => db.claimTask(b.id, "w")).toThrow(/is blocked by/);
-    db.claimTask(a.id, "w");
-    expect(() => db.claimTask(a.id, "w")).toThrow(/is claimed, cannot claim/);
-    expect(() => db.updateTask("nope", { status: "done" })).toThrow(/not found/i);
+    expect(() => db.claimTask(b.id, "w", { kind: "instance", name: "w" })).toThrow(/is blocked by/);
+    db.claimTask(a.id, "w", { kind: "instance", name: "w" });
+    expect(() => db.claimTask(a.id, "w", { kind: "instance", name: "w" })).toThrow(/is claimed, cannot claim/);
+    expect(() => db.updateTask("nope", { status: "done" }, DEV)).toThrow(/not found/i);
   });
 });
 
@@ -575,6 +594,19 @@ describe("11. migration and a release without the board", () => {
     expect(open(path).board.getCard(m.code).status).toBe("review");
   });
 
+  it("opening again only reads: it does not wait for another connection's write (the CLI opens the file per command)", () => {
+    const { db, path } = open();
+    db.createTask({ title: "A", created_by: "x" });
+    db.close();
+    const raw = new Database(path);
+    raw.exec("BEGIN IMMEDIATE");
+    try {
+      const started = Date.now();
+      expect(open(path).board.getCard("M-1").title).toBe("A");
+      expect(Date.now() - started).toBeLessThan(2000);       // the lock would hold it for busy_timeout (5 s), then fail
+    } finally { raw.exec("ROLLBACK"); raw.close(); }
+  });
+
   it("migrating twice changes nothing", () => {
     const { db, path } = open();
     db.createTask({ title: "A", created_by: "x" });
@@ -605,7 +637,14 @@ describe("11b. a board read is bounded", () => {
 });
 
 describe("12. retention keeps the board's record", () => {
-  it("prunes old finished tasks outside projects with their comments and history; keeps project cards and families", async () => {
+  const count = (path: string, sql: string, ...args: unknown[]) => {
+    const raw = new Database(path);
+    try { return (raw.prepare(sql).get(...args) as { n: number }).n; } finally { raw.close(); }
+  };
+  /** Every row last changed long ago. */
+  const age = (path: string) => { const raw = new Database(path); raw.prepare("UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z'").run(); raw.close(); };
+
+  it("prunes old finished work outside projects with its comments and history; an active project keeps its record", async () => {
     const { db, board, path } = withProject();
     const loose = db.createTask({ title: "Loose", created_by: "x" });
     board.updateCard(ANN, loose.id, { comment: "bye" });
@@ -617,18 +656,62 @@ describe("12. retention keeps the board's record", () => {
     board.moveCard(ANN, child.code, "done");
     board.moveCard(ANN, family.code, "done");
     db.close();
+    age(path);
+    const again = open(path);
+    expect(await again.db.pruneOldTasks(30)).toBe(3);
+    expect(again.db.getTask(loose.id)).toBeNull();
+    expect(again.board.findCard(family.code)).toBeUndefined();
+    expect(again.board.findCard(child.code)).toBeUndefined();
+    expect(again.board.findCard(kept.code)).toBeDefined();
+    for (const id of [loose.id, family.uuid, child.uuid]) {
+      expect(count(path, "SELECT COUNT(*) AS n FROM task_entries WHERE task_id = ?", id)).toBe(0);
+      expect(count(path, "SELECT COUNT(*) AS n FROM task_events WHERE task_id = ?", id)).toBe(0);
+    }
+  });
+
+  it("an archived project's finished families go when all of each is old; a recent sub task or a live dependency keeps one", async () => {
+    const { db, board, path, project } = withProject();
+    const done = (ref: string) => board.moveCard(ANN, ref, "done");
+    const gone = main(board, ANN);
+    done(sub(board, ANN, gone.code).code); done(gone.code);
+    const recent = main(board, ANN);
+    const late = sub(board, ANN, recent.code);
+    done(late.code); done(recent.code);
+    const needed = main(board, ANN);
+    done(needed.code);
+    board.updateProject(ANN, project.id, { archived: true });
+    const waiting = board.createCards(ANN, { cards: [{ title: "Needs it", dependsOn: [needed.code] }] }).cards[0]!;
+    db.close();
+    age(path);
     const raw = new Database(path);
-    raw.prepare("UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z'").run();
+    raw.prepare("UPDATE tasks SET updated_at = ? WHERE id IN (?, ?)").run(new Date().toISOString(), late.uuid, waiting.uuid);
     raw.close();
     const again = open(path);
-    expect(await again.db.pruneOldTasks(30)).toBe(1);
-    expect(again.db.getTask(loose.id)).toBeNull();
-    expect(again.board.findCard(kept.code)).toBeDefined();
-    expect(again.board.findCard(family.code)).toBeDefined();
-    expect(again.board.findCard(child.code)).toBeDefined();
-    const raw2 = new Database(path);
-    expect((raw2.prepare("SELECT COUNT(*) AS n FROM task_entries WHERE task_id = ?").get(loose.id) as { n: number }).n).toBe(0);
-    expect((raw2.prepare("SELECT COUNT(*) AS n FROM task_events WHERE task_id = ?").get(loose.id) as { n: number }).n).toBe(0);
-    raw2.close();
+    expect(await again.db.pruneOldTasks(30)).toBe(2);
+    expect(again.board.findCard(gone.code)).toBeUndefined();
+    expect(again.board.findCard(recent.code)).toBeDefined();
+    expect(again.board.findCard(late.code)).toBeDefined();
+    expect(again.board.findCard(needed.code)).toBeDefined();
+  });
+
+  it("what a release without the board prunes (the task, not its comments, history or sub tasks) is cleared on the next prune", async () => {
+    const { db, board, path } = withProject();
+    const m = board.createCards(ANN, { cards: [{ title: "No project" }] }).cards[0]!;
+    const s = sub(board, ANN, m.code);
+    board.updateCard(ANN, s.code, { comment: "on the sub task" });
+    board.moveCard(ANN, s.code, "done");
+    board.moveCard(ANN, m.code, "done");
+    board.updateCard(ANN, m.code, { comment: "on the main task" });
+    db.close();
+    age(path);
+    // The old prune deletes rows from `tasks` only — here the main task, as if its sub task had been newer then.
+    const raw = new Database(path);
+    raw.prepare("DELETE FROM tasks WHERE id = ?").run(m.uuid);
+    raw.close();
+    const again = open(path);
+    expect(await again.db.pruneOldTasks(30)).toBe(1);                 // the sub task left without its main task
+    expect(again.board.findCard(s.code)).toBeUndefined();
+    expect(count(path, "SELECT COUNT(*) AS n FROM task_entries")).toBe(0);
+    expect(count(path, "SELECT COUNT(*) AS n FROM task_events")).toBe(0);
   });
 });

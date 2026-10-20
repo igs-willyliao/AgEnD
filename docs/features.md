@@ -296,7 +296,16 @@ A fleet-wide task list, kept in the fleet's SQLite database, through one `task` 
 - `task(action: "update")` — change `status` (`open` / `claimed` / `review` / `done` / `blocked` / `cancelled`), `priority`, `assignee` or `result`.
 - `task(action: "list")` — every task, most urgent first; narrow it with `filter_assignee` and `filter_status`. Without a filter it lists what is not finished (`open`, `claimed`, `blocked`, `review`).
 
-`id` takes a task id, an 8-hex prefix, or a card number from the dashboard (`M-3`); `get` and `verbose` rows carry the card number as `code`. On the board's cards — in a project, a sub task, one with sub tasks, or one waiting for the person — the tool follows the board's rules below: an instance claims an unassigned card or its own, finishes its own with a `result`, and does not reopen, cancel or reassign someone else's. Tasks outside the board move as they always have.
+`id` takes a task id, an 8-hex prefix, or a card number from the dashboard (`M-3`); list rows carry the card number as `code`.
+
+The board's own actions answer in plain text, a line per card — what an agent needs after a context reset, without JSON:
+
+- `task(action: "mine")` — your work: sent back to you, in progress, blocked, waiting for the person, ready to start (your open cards, and the unassigned sub tasks of main tasks you coordinate), waiting on dependencies, cards with comments you have not seen, and the main tasks you coordinate with their progress.
+- `task(action: "get")` on a board card — the card: where it sits, goal, scope, checklist, context, state, blocked reason, result, a main task's sub tasks, and the comments new to its assignee (your next write on it hands them to you).
+- `task(action: "move", id, to)` — to `claimed`, `blocked` (with a `reason`: who must answer what), `review` or `done` (with a `result`), `open` or `cancelled` (with a `reason`), under the board's rules; `comment` and `version` ride along.
+- `task(action: "create")` with `project` (a main task in that project) or `parent` (a sub task of that main task), plus `description` (the goal), `scope`, `acceptance`, `context`, `size`, `needs_review`, `depends_on` (card numbers).
+- `task(action: "update")` with board fields — `state` (overwritten: done / next / watch out), `log` (one progress line), `comment`, `acceptance`, `check` / `uncheck` (1-based), `description`, `scope`, `context`, `size`, `depends_on`, `version`. A status change on a board card is a `move`.
+- `task(action: "list")` with `project` or `parent` — those cards, a line each; `task(action: "projects")` — the projects with their numbers.
 
 Creating, claiming and completing a task are written to the activity log. Every tool profile except `minimal` has `task`.
 
@@ -309,9 +318,11 @@ The Tasks tab is the board itself (design: [task-board](design/task-board.md), p
 - A card opens in a dialog. Every field edits in place — goal, scope, definition of done (or a sub task's acceptance checklist), context, state, result — with its assignee, project, priority, size, dependencies and **Stop at review for my confirmation**; then its sub tasks (type a title to add one), its comments, its progress log and its history. **Search cards** finds a phrase in titles, fields, checklists and comments.
 - **Your confirmation.** A main task opened on the dashboard stops at review when it is finished; a sub task only when flagged. Only a person signed in on the dashboard takes a card from review to done, sends it back (with what needs to change, which its assignee reads), clears the flag or reopens finished work: an instance's `done` on such a card is `review`, and a request with the web token alone is held to an instance's rules. A main task with sub tasks follows them — in progress once one starts, waiting for you once all are done; you can also block it, and adding a sub task to a confirmed one (only you can) reopens it.
 - **Versions.** Each card has a version. An edit started before an instance's newer write is refused; the newer card is shown with your edit still open, and saving again overwrites it.
+- **Without dragging.** A card's title is a button: Enter opens it, Alt+← / Alt+→ moves it to the column before or after, Alt+↑ / Alt+↓ within its column. In the card, **Move to…** and the **Position** row (up, down) do the same on a phone.
+- **The public link** shows the board read-only, without the cards of instances set to `cross_instance_visibility: hidden`. Changes are made on the dashboard itself.
 - The board updates as instances work, and a card's address (`?card=M-3`) opens it.
 
-Tasks from before the board keep their ids and become main tasks under No project, numbered in the order they were opened. `retention_days` prunes old finished tasks only outside the board's projects and families, so a project's record (cards, comments, history) is kept.
+Tasks from before the board keep their ids and become main tasks under No project, numbered in the order they were opened. `retention_days` prunes old finished work with no project, and finished main tasks of an archived project once each one's sub tasks are finished and as old; an active project keeps its record (cards, comments, history). Before rolling back to a release without the board, raise `retention_days` (see [downgrade-compatibility.md](downgrade-compatibility.md)).
 
 ## Decisions
 
