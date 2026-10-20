@@ -126,16 +126,16 @@ export const TaskBoardArgs = z.object({
   assignee: z.string().optional().describe("Instance name to assign (create/update)"),
   depends_on: z.array(z.string()).optional()
     .describe("Task IDs this depends on (create)"),
-  id: z.string().optional().describe("Task ID or 8-hex id prefix (claim/done/update/get)"),
+  id: z.string().optional().describe("Task ID, 8-hex id prefix, or card number like M-3 (claim/done/update/get)"),
   result: z.string().optional().describe("Completion summary (done)"),
-  status: z.enum(["open", "claimed", "done", "blocked", "cancelled"]).optional()
+  status: z.enum(["open", "claimed", "review", "done", "blocked", "cancelled"]).optional()
     .describe("New status (update)"),
   filter_assignee: z.string().optional().describe("Filter by assignee (list)"),
   filter_status: z.union([
-    z.enum(["open", "claimed", "done", "blocked", "cancelled"]),
-    z.array(z.enum(["open", "claimed", "done", "blocked", "cancelled"])),
+    z.enum(["open", "claimed", "review", "done", "blocked", "cancelled"]),
+    z.array(z.enum(["open", "claimed", "review", "done", "blocked", "cancelled"])),
   ]).optional()
-    .describe("Filter by status (list) — a single status or an array of statuses. Omit for live-only (open/claimed/blocked)."),
+    .describe("Filter by status (list) — a single status or an array of statuses. Omit for live-only (open/claimed/blocked/review)."),
   verbose: z.boolean().optional()
     .describe("list: return full task records instead of compact rows (default false)"),
 });

@@ -148,7 +148,8 @@ export const TASK_LIST_CAP = 100;
  * #1336: the non-terminal statuses a bare `list` returns by default. `done`
  * and `cancelled` are excluded unless the caller passes `filter_status`.
  */
-export const LIVE_TASK_STATUSES: string[] = ["open", "claimed", "blocked"];
+/** Not finished: `review` is done work waiting for the person (the task board), still live. */
+export const LIVE_TASK_STATUSES: string[] = ["open", "claimed", "blocked", "review"];
 
 /**
  * #1336 P2: shared normalization for filter_status across both task handlers
@@ -7327,6 +7328,8 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       );
       this.scheduler.init();
       this.logger.info("Scheduler initialized");
+      // The task board: every committed change, for the open pages (the card numbers it touched; never to a guest).
+      this.scheduler.db.board.onChange((change) => this.emitSseEvent("tasks", change));
 
       // Tips share the daily-report clock but remain an independent internal
       // job: disabling daily_summary must not disable tips (and vice versa).
@@ -10746,8 +10749,8 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     const asPriority = (v: unknown): "low" | "normal" | "high" | "urgent" | undefined => {
       return (v === "low" || v === "normal" || v === "high" || v === "urgent") ? v : undefined;
     };
-    const asStatus = (v: unknown): "open" | "claimed" | "done" | "blocked" | "cancelled" | undefined => {
-      return (v === "open" || v === "claimed" || v === "done" || v === "blocked" || v === "cancelled") ? v : undefined;
+    const asStatus = (v: unknown): "open" | "claimed" | "review" | "done" | "blocked" | "cancelled" | undefined => {
+      return (v === "open" || v === "claimed" || v === "review" || v === "done" || v === "blocked" || v === "cancelled") ? v : undefined;
     };
     // #1336 P2: use the shared normalizer — trims whitespace AND drops empties,
     // so " \t " / [" ","\t"] are treated identically to undefined.
@@ -10795,7 +10798,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         case "done": {
           const id = asStr(args.id);
           if (!id) return { error: "id is required" };
-          return ack(db.completeTask(db.getTaskByPrefix(id).id, asStr(args.result)));
+          return ack(db.completeTask(db.getTaskByPrefix(id).id, asStr(args.result), { kind: "instance", name: instance }));
         }
         case "update": {
           const id = asStr(args.id);
@@ -10805,7 +10808,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
             assignee: asStr(args.assignee),
             result: asStr(args.result),
             priority: asPriority(args.priority),
-          }));
+          }, { kind: "instance", name: instance }));
         }
         default: return { error: `Unknown task action: ${action}` };
       }
@@ -10941,7 +10944,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
           result = ack(logTask);
           break;
         case "done":
-          logTask = db.completeTask(db.getTaskByPrefix(payload.id as string).id, payload.result as string | undefined);
+          logTask = db.completeTask(db.getTaskByPrefix(payload.id as string).id, payload.result as string | undefined, { kind: "instance", name: meta.instance_name || instanceName });
           result = ack(logTask);
           break;
         case "update":
@@ -10950,7 +10953,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
             assignee: payload.assignee as string | undefined,
             result: payload.result as string | undefined,
             priority: payload.priority as string | undefined,
-          } as Record<string, unknown>);
+          } as Record<string, unknown>, { kind: "instance", name: meta.instance_name || instanceName });
           result = ack(logTask);
           break;
         default:

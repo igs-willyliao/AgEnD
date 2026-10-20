@@ -48,6 +48,10 @@ export function isPublicWebRoute(method: string, path: string): boolean {
   if (method === "GET" && /^\/ui\/(?:img\/(?:bot|avatar|emoji)\/[^/]+|emojis|mentions)$/.test(path)) return true;
   if (method === "POST" && /^\/ui\/(send|upload|prompt|reply-button|command|needs\/ack|cancel\/[^/]+|stop\/[^/]+|start\/[^/]+|instances\/[^/]+\/delete|restart\/[^/]+|instances|tasks|config)$/.test(path)) return true;
   if (method === "POST" && /^\/ui\/tasks\/[^/]+$/.test(path)) return true;
+  // The task board (scheduler/task-board.ts): the person works the board over the public link as on the local page —
+  // its card, its moves and order, its projects. The handlers act only for a signed-in session.
+  if (method === "GET" && /^\/ui\/tasks\/cards\/[^/]+$/.test(path)) return true;
+  if (method === "POST" && /^\/ui\/tasks\/(?:cards\/[^/]+(?:\/(?:move|reorder))?|projects\/\d+)$/.test(path)) return true;
   // #1827: the person's own name (a profile edit, which the public link may make).
   if ((method === "GET" || method === "POST") && path === "/ui/profile") return true;
   // #1724: schedules are not created, edited or deleted over the public link (the handlers refuse it too).
