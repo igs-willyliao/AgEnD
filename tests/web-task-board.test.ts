@@ -301,12 +301,27 @@ describe("4. the public link reads the board and changes nothing on it", () => {
 
   it("cards of instances kept out of sight (cross_instance_visibility: hidden) are left out over the link; the local page shows them", async () => {
     const db = scratchDb();
-    db.board.createCards(ANN, { cards: [{ title: "Open work", assignee: "dev-a" }, { title: "Secret work", assignee: "spy" }] });
+    db.board.createCards(ANN, { cards: [{ title: "Open work", assignee: "dev-a" }, { title: "Secret work", assignee: "spy" },
+      { title: "Handed out by the spy", assignee: "dev-a", dispatcher: { kind: "instance", name: "spy" } }] });
     const fleetConfig = { defaults: {}, instances: { "dev-a": {}, spy: { cross_instance_visibility: "hidden" } } };
     expect((await viaLink(db, "GET", "/ui/tasks/board", undefined, { fleetConfig })).body.cards.map((c: any) => c.id)).toEqual(["M-1"]);
     expect((await viaLink(db, "GET", "/ui/tasks/cards/M-2", undefined, { fleetConfig })).status).toBe(404);
     expect((await viaLink(db, "GET", "/ui/tasks/search?q=work", undefined, { fleetConfig })).body.results.map((r: any) => r.card.id)).toEqual(["M-1"]);
-    expect((await viaLink(db, "GET", "/ui/tasks/board", undefined, { fleetConfig, local: true })).body.cards.map((c: any) => c.id)).toEqual(["M-1", "M-2"]);
+    expect((await viaLink(db, "GET", "/ui/tasks/board", undefined, { fleetConfig, local: true })).body.cards.map((c: any) => c.id)).toEqual(["M-1", "M-2", "M-3"]);
+  });
+});
+
+describe("4b. who handed a card out, from the dashboard", () => {
+  it("an instance, the person writing, or nobody; anything else is a 400", async () => {
+    const db = scratchDb();
+    db.board.createCards(ANN, { cards: [{ title: "Work", assignee: "dev-a" }] });
+    const set = (dispatcher: unknown) => viaLink(db, "POST", "/ui/tasks/cards/M-1", { dispatcher }, { local: true });
+    expect((await set({ kind: "instance", name: "lead" })).body.card.dispatcher).toEqual({ kind: "instance", name: "lead" });
+    const me = (await set({ kind: "person" })).body.card.dispatcher;
+    expect(me.kind).toBe("person");
+    expect((await set(null)).body.card.dispatcher).toBeNull();
+    expect((await set("lead")).status).toBe(400);
+    expect((await set({ kind: "person", name: "Somebody else" })).status).toBe(400);
   });
 });
 

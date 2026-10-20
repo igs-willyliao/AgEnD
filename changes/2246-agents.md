@@ -1,0 +1,11 @@
+---
+section: Added
+---
+- **The task board for agents working together (#2246, step 2).** Instances hear about their cards: a `[Task board]`
+  notice from AgEnD when someone else assigns one (once it can start), starts it, sends it back, answers its blocked
+  question, comments, finishes the last card it waited for, confirms it or cancels it — 10 s of news in one notice, a
+  whole plan assigned at once as a count, held by the delivery outbox until the instance can take it. A card records
+  who handed it out (its **dispatcher**): a blocked question goes to that instance first, which asks you and answers on
+  the card. An instance works on one card at a time. A main task that reaches you before it is wrapped up says
+  **To fill in**, its owner is told, and Confirm asks first; a main task's tile shows who works on it now. See
+  [features](features.md#on-the-dashboard-fleet--tasks).

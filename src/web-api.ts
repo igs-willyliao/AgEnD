@@ -90,6 +90,8 @@ const TaskUpdateSchema = z.object({
 // The task board (scheduler/task-board.ts). Coarse bounds here; the board checks each field's own limit.
 const BOARD_TEXT = 8_192;
 const CardRef = z.string().min(1).max(64);
+/** Who handed a card out: an instance, the person writing ({ kind: "person" }), or nobody. */
+const DispatcherSchema = z.union([z.object({ kind: z.literal("instance"), name: z.string().min(1).max(128) }).strict(), z.object({ kind: z.literal("person") }).strict()]).nullable();
 const CardCreateSchema = z.object({
   kind: z.enum(["main", "sub"]).optional(),
   project: z.union([z.number().int(), z.string().max(256)]).nullable().optional(),
@@ -103,6 +105,7 @@ const CardCreateSchema = z.object({
   priority: z.enum(CARD_PRIORITIES).optional(),
   dependsOn: z.array(CardRef).max(50).optional(),
   assignee: z.string().max(128).nullable().optional(),
+  dispatcher: DispatcherSchema.optional(),
   needsReview: z.boolean().optional(),
 }).strict();
 
@@ -118,6 +121,7 @@ const CardPatchSchema = z.object({
   size: z.enum(CARD_SIZES).nullable().optional(),
   priority: z.enum(CARD_PRIORITIES).optional(),
   assignee: z.string().max(128).nullable().optional(),
+  dispatcher: DispatcherSchema.optional(),
   needsReview: z.boolean().optional(),
   dependsOn: z.array(CardRef).max(50).optional(),
   acceptance: z.array(z.string().max(1024)).max(50).optional(),
@@ -2071,8 +2075,8 @@ export function handleWebRequest(
     if (gateway && method !== "GET") { json(res, 403, { error: "task_board_not_over_public_link", code: "forbidden", key: "not_over_public_link" }); return true; }
     // …nor shows the cards of instances kept out of sight (cross_instance_visibility: hidden).
     const fleet = ctx.fleetConfig as Parameters<typeof crossInstanceVisibility>[0];
-    const hidden = (c: { assignee: string | null; createdBy: string }) => !!gateway
-      && [c.assignee, c.createdBy].some((n) => !!n && !!ctx.fleetConfig?.instances?.[n] && crossInstanceVisibility(fleet, n) === "hidden");
+    const hidden = (c: { assignee: string | null; createdBy: string; dispatcher: { name: string } | null }) => !!gateway
+      && [c.assignee, c.createdBy, c.dispatcher?.name].some((n) => !!n && !!ctx.fleetConfig?.instances?.[n] && crossInstanceVisibility(fleet, n) === "hidden");
     const card = /^\/ui\/tasks\/cards\/([^/]+)(?:\/(move|reorder))?$/.exec(path);
     const project = /^\/ui\/tasks\/projects\/(\d+)$/.exec(path);
     try {
