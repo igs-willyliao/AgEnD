@@ -254,16 +254,69 @@ export class GrokBackend implements CliBackend {
    * `I waited… 30s for the build` are both rejected.
    */
   getBusyPattern(): RegExp {
-    return /^[ \t]*[\u2800-\u28FF]\s+\p{L}[^\n]*…\s*\d+(\.\d+)?s\b/mu;
+    // The turn-status spinner line always ends with [stop] (and sometimes [↓][stop]).
+    // Confirmed from all fixtures in grok-1.0.52-audit/ and grok-1.0.60-audit/:
+    //   ⠴ Waiting for response… 3.0s         3.0s ⇣1.33k [stop]
+    //   ⠦ Compacting…                          4.9s ⇣1.20k [stop]
+    //   ⠹ Server error (500) | Retrying…       7.0s ⇣1.45k [stop]
+    //   ⠼ Run Read `/…/install-sh…`… 0.1s     3m19s ⇣24.4k [↓][stop]
+    //
+    // The Watchers panel uses braille glyphs too, but its lines do NOT end with [stop]:
+    //   ⠴ Monitor Watch PR 2315 merge…        45.2s        ← no [stop]
+    //   ⠸ Waiting for PR 2315 merge…          2h01m        ← no [stop]
+    //
+    // Using [stop] as the discriminator is more robust than a verb whitelist:
+    // it works for any present or future Grok status verb (including tool names
+    // like "Run", "Read", "Write" that start with common English words that could
+    // also appear in watcher titles).
+    return /^[ \t]*[\u2800-\u28FF]\s+\S[^\n]*…[^\n]*\[stop\]/mu;
   }
 
   getErrorPatterns(): ErrorPattern[] {
     // NOTE: "Turn cancelled by user" is NORMAL behaviour (user interrupt), not an
     // error — none of the patterns below match it, and none should be added that do.
-    // Error strings below are best-effort generic API shapes; tune once observed live.
+    //
+    // Real Grok error line format (fixtures in tests/fixtures/grok-1.0.60-audit/):
+    //   All errors appear on lines prefixed with ┃ (U+2503), the Grok box border.
+    //
+    //   429:  ┃  Retry failed: rate_limit_error: Rate limit exceeded
+    //         ┃  Retry failed: rate_limit_error: rate limit exceeded; too many requests
+    //
+    //   401:  ┃  Authentication required: … (no status code on screen — intentionally
+    //         NOT pattern-matched here; auth is verified via grok models as a second
+    //         opinion, LOGIN_FLOWS.grok.authCheck. See tests/grok-1.0.52-audit.test.ts
+    //         "grok auth" describe block. #1792 follow-up.)
+    //
+    //   402/quota: handled by the weekly-limit dialog (WEEKLY), not a pattern here.
+    //   403-usage: "Request denied (403): usage limit reached" — intentionally idle
+    //              per audit (#1792 follow-up).
+    //
+    // Only rate_limit is anchored on ┃; auth and quota use the original broader
+    // patterns because the audit pinned them as not-error (idle) and the agent
+    // auth flow uses a second-opinion check rather than a bare pattern match.
     return [
-      { pattern: /rate.?limit|too many requests|\b429\b/i, type: "rate_limit", action: "failover", message: "Grok rate limit reached" },
+      {
+        // 429: two confirmed formats (fixtures in tests/fixtures/grok-1.0.60-audit/):
+        //   1.0.60: "┃  Retry failed: rate_limit_error: …"
+        //   1.0.52: "┃  Retry failed: Some resource has been exhausted: Your team has exceeded
+        //            ┃  its rate limit. Please try again later."  (wraps at 80col)
+        //
+        // Require the specific known payload — either `rate_limit_error:` on the Retry
+        // line, or the exhausted-resource sentence (which may wrap to a ┃ continuation).
+        // This prevents matching unrelated ┃ Retry blocks followed by ┃ lines that merely
+        // contain the word "rate_limit" (e.g. a function call like scan_rate_limit()).
+        pattern: /^[ \t]*┃[ \t]+Retry failed:[ \t]+(?:rate_limit_error:|Some resource has been exhausted:[^\n]*(?:\n[ \t]*┃[ \t]+[^\n]*)*?rate limit)/im,
+        type: "rate_limit",
+        action: "failover",
+        message: "Grok rate limit reached",
+      },
+      // 401: intentionally broad backstop; the primary gate is LOGIN_FLOWS.grok.authCheck.
+      // The 1.0.52 audit pinned this screen as idle (no auth error raised), so this
+      // pattern fires only if future CLI versions show a status code (#1792 follow-up).
       { pattern: /unauthorized|authentication (failed|error)|\b401\b/i, type: "auth_error", action: "pause", message: "Grok authentication error" },
+      // quota: the weekly-limit dialog handles the modal; this is a backstop for any
+      // plain-text quota message the dialog doesn't catch. The 403-usage form is idle
+      // per the audit (#1792 follow-up).
       { pattern: /quota|insufficient credits|out of credits/i, type: "quota", action: "notify", message: "Grok quota/credits exhausted" },
       // #1066: the server refuses an outdated CLI (HTTP 426, Upgrade Required):
       //   Request failed (426) — Your Grok CLI version (1.0.5) is outdated.

@@ -149,6 +149,10 @@ Pick an instance on the left to talk to it. The web chat is **the same conversat
 - Types: **any file**, as in Discord and Telegram. The type is read from the file itself, not from its name. PNG, JPEG, GIF and WebP are images; PDF and UTF-8 text are kept as such. Anything else (an archive, an office file, a program, HTML, SVG …) is stored under its own extension (lower-case letters and digits, else `.bin`), and in the chat it is only ever a download, never opened in the page.
 - The agent receives files exactly as from Telegram: the file lands in the instance's workspace inbox (`<AGEND_HOME>/workspaces/<instance>/inbox`), with an `[📷 Image: …]` / `[📎 File: …]` line.
 - Files the agent attaches to its reply show in the chat. Images show inline, and video and audio play inline. Markdown, CSV/TSV, JSON, code and text files get a **Show** card (200 lines, then **Show all … lines**; over 1 MiB, download it to read it). Anything else is a download, never opened in the page. Over the temporary public link only images show inline.
+- **Clicking a chat image** opens it full size over the chat (a modifier-click opens the file as the browser does). It opens fitted to the window. To read the detail of a big picture:
+  - **On a computer:** the wheel zooms around the pointer. Once the picture is larger than the window, the plain wheel scrolls it and Ctrl/⌘+wheel (or a trackpad pinch) zooms. Click the picture for **100%** at that spot, and click again to fit. Drag to move around. **Fit width** (or `W`) spans a tall picture across the window to read it by scrolling. The toolbar shows the zoom level (click it for fit / 100%) between **−** and **+**. The keys are `+`, `-`, `0` (fit), `1` (100%) and `W`. The arrows step between a message's images, and Esc closes.
+  - **On a phone:** pinch to zoom, drag with one finger to move, and double-tap for 100% at that spot (again to fit). A tap on the dark area closes it.
+  - Every image opens fitted, and stepping to the next one fits it again. The same viewer shows images in replies and on the temporary public link.
 - The chat keeps its own copy of each reply file (`<AGEND_HOME>/workspaces/<instance>/web-files`), so the file still opens after the agent changes or deletes its original, or the fleet restarts. A symlink, a file over 50 MB, or a file inside the AgEnD state folder (other than inbox/) is not shown. A copy is deleted when its message leaves the chat history; each instance keeps at most 1 GiB of copies, and above that the oldest go first.
 - An attached file that is **not sent within 30 minutes** is deleted. After a fleet restart, any such file left over is removed at startup once it is 30 minutes old.
 - Files that were sent stay in the inbox for **7 days**, like files from Telegram.
@@ -191,6 +195,8 @@ Each message you send shows how far it got, the same steps Telegram shows as rea
 | ✓✓ | The agent has it |
 | ! | Not delivered |
 | ⊘ | Dropped by **Stop** before the agent got it |
+
+**Reactions.** A message that only needs an acknowledgement ("OK", "thanks") may get one from the agent: an emoji (👍, 👌, 🙏…) under your bubble instead of a reply, as on Discord and Telegram. It appears at once, and also after a reload or on another device. When your message was copied to the agent's Discord/Telegram topic or room, the copy gets the same reaction. A reaction is a complete answer: the chat does not say the agent ended its turn without replying.
 
 ### "*name* is working…" and Stop
 While the open chat's agent is working, a line above the composer says so, and **Stop reply** appears in the composer in place of **Send**. Type something and **Send** comes back beside it: a message sent while the agent works waits its turn.
@@ -336,6 +342,19 @@ A fleet with no chat connection yet (web only) shows a card above the Agents and
   - Both always **add** a connection. A second bot on the same platform, even in the same server, becomes its own connection (`discord-2`, …); an existing connection is never replaced. To change a connection's token, open its **Settings** → **Advanced** → **Replace**.
   - A connection shows **Token set** (with the bot's name while it runs) or **Token missing**, never the token. A new connection starts as soon as Apply runs, without a restart, when AgEnD is already running another connection and nothing else at fleet level changed; the Apply card says "Starting the new connection". A fleet's first connection, or a change to an existing one, still offers **Restart AgEnD**. A token replaced on a connection that is not running starts it the same way; for the first connection it waits for that restart.
 - **A change that needs a fleet admin's confirmation** (see [Confirming sensitive changes](#confirming-sensitive-changes)) shows a card in any panel: what it changes, the time left, and **Withdraw**. Apply waits for it; once it is confirmed the rest goes on, and if it is refused or expires, nothing after it is applied and those changes are staged again (a bot token has to be entered again).
+
+### App icon
+
+The picture a browser tab shows for the dashboard, and the icon an "Add to Home Screen" shortcut gets on a phone. **Settings → Web appearance → Look → App icon**:
+
+- **Choose image…** a square picture: PNG, JPG or WebP, 512 × 512 or larger. A wider or taller one is cropped to its centre; a smaller one is enlarged (the card warns, since it may look soft). You see the new icon before **Use this icon**; **Cancel** keeps the old one.
+- **Restore default** brings back the AgEnD icon.
+- Only an admin's session can change it. A read-only session sees it; guests and the public link do not have the card.
+- **Who sees it:** everyone who can open the dashboard's address — the sign-in page and the public link show the same icon, as they did the AgEnD one. Do not use a private picture.
+- **On an iPhone or iPad** the home screen keeps the icon it had when the shortcut was added: remove the shortcut and add it again to see a new one. Android and desktop browsers pick it up on their next visit.
+- The dashboard has a web app manifest (`/manifest.webmanifest`: the name AgEnD, standalone, the 192 and 512 px icons), so installing it as an app on Android or a desktop uses the same icon.
+
+The host makes the sizes from the one picture (the 180 px touch icon, a 32/48 px favicon, the manifest's 192 and 512 px) and keeps them in its state directory (`web-app-icon/`). Every icon address carries the icon's version, so a browser fetches the new one as soon as it changes.
 
 ### Identity colours
 
