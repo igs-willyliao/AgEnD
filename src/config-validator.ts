@@ -402,7 +402,7 @@ export function validateFleetConfig(config: unknown): ValidationResult {
     }
     // #1629 r4.1 Q3 (b): never an error — a value out of its bound is clamped, a wrong one falls back to its default.
     if (config.web.appearance !== undefined) for (const w of effectiveAppearanceLimits(config.web.appearance).warnings) warn(w.path, w.message);
-    if (config.web.public_link !== undefined && !validPublicLinkPatch(config.web.public_link)) err("web.public_link", "expected allow_public boolean, ttl_minutes integer 1..480, protocol http2/quic/auto");
+    if (config.web.public_link !== undefined && !validPublicLinkPatch(config.web.public_link)) err("web.public_link", "expected allow_public boolean, ttl_minutes integer 1..480, protocol http2/quic/auto, optional named hostname/token reference/origin port");
     if (config.web.echo_to_channel !== undefined && typeof config.web.echo_to_channel !== "boolean") {
       err("web.echo_to_channel", "must be a boolean");
     }
@@ -562,6 +562,13 @@ export function validateFleetConfig(config: unknown): ValidationResult {
       validateDeliveryWorker(inst.delivery_worker, `instances.${name}.delivery_worker`);
       validateInstanceOptions(inst, `instances.${name}`);
       warnUnresolvedPromptFiles(inst, `instances.${name}`, isObj(config.defaults) ? config.defaults : {});
+      // startup is a fleet-level key (concurrency, stagger_delay_ms); it has no per-instance
+      // meaning. An explicit startup entry in an instance will not cause spontaneous restarts
+      // (classifyInstanceChange only sees a diff when the entry itself changes), but the key
+      // has no effect on instance behaviour and should live under defaults.startup instead.
+      if ((inst as Record<string, unknown>).startup !== undefined) {
+        warn(`instances.${name}.startup`, "`startup` is a fleet-level key and has no effect under an instance entry — move it to `defaults.startup` or remove it");
+      }
     }
   }
   if (generalCount === 0) {
