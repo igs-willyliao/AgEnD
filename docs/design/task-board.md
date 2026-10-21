@@ -239,8 +239,30 @@ words) and the delivery outbox holds it until the instance can take it, across a
 gathering when the fleet stops is lost; the card keeps it (`mine`, the comments new to its assignee). Blocked cards
 with an instance dispatcher still wait for you on Home, marked as asked first.
 
+## Step 3: the person in the chat
+
+The product rule the board's web actions bent (see "Product direction") is restored for what waits on the person:
+confirming and sending back work, and answering a blocked card, happen in the chat too — where "Needs you" already is
+(docs/design/1386-needs-you-inbox.md).
+
+- **Items.** Cards in review that need the person's confirmation, and blocked cards, are Needs you items of type `task`
+  (`TaskBoard.waitingForPerson`), under the card's assignee — so each chat world lists the cards of its own instances.
+  A line names the card and what it asks (the question) or lacks ("not wrapped up: …"). A card an instance handed out
+  (its dispatcher) is listed on the web only: that instance tells the person in the chat (the `to_confirm` and
+  `decide` wakes), and the list does not say it twice. A card nobody is assigned is the web's only too.
+- **Buttons.** The live message carries, for at most three cards: **Confirm** and **Send back** on a card waiting for
+  confirmation, **Answer** on a blocked one — capabilities minted per render like Acknowledge (bound to the world,
+  chat, thread and message, a fleet admin of that world, the card still that world's, 15 minutes), and carrying the
+  card's version: a newer card renders again, and a stale click is told so.
+- **Words by reply.** Send back and Answer need words, which a button cannot carry: the bot posts a prompt in the same
+  place ("Send back M-3 (@ann): reply to this message with what needs to change"), and the clicker's reply to it — that
+  admin's only, within 10 minutes — is the reason or the answer. The inbound handler hands such a reply to the hub
+  after access control and the dedup claim and before routing; anything else (another person, another message, a
+  lapsed prompt) flows on to the instance as before. The outcome is said as a reply to the reply.
+- **Who acts.** The person, named by the platform (`person: <username>`), through the board's rules — the same as a
+  signed-in page; the web's Needs you list links each card to its dialog.
+
 ## Next
 
-- **Step 3 — the person in the chat.** Cards waiting for review or blocked in Needs you and the fleet's notification
-  channel, with Confirm / Send back there (a blocked card with an instance dispatcher goes to it first); a daily
-  summary; importing a taskhall database; each instance's board work on its details page.
+- **Step 3, rest.** A daily summary of the board; importing a taskhall database; each instance's board work on its
+  details page.

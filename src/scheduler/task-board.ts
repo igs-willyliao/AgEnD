@@ -1060,6 +1060,19 @@ export class TaskBoard {
     };
   }
 
+  /**
+   * What waits for the person (step 3: Needs you): cards in review that need their confirmation, and blocked cards —
+   * oldest first, each with when it started waiting (its last move to that status).
+   */
+  waitingForPerson(): Array<{ card: Card; since: string }> {
+    const rows = (this.db.prepare("SELECT * FROM tasks WHERE (status = 'review' AND needs_review = 1) OR status = 'blocked' ORDER BY updated_at").all() as Row[]).map(toCard);
+    const moved = this.db.prepare("SELECT at FROM task_events WHERE task_id = ? AND type = 'moved' AND json_extract(data, '$.to') = ? ORDER BY id DESC LIMIT 1");
+    return rows.map((card) => {
+      const at = (moved.get(card.uuid, card.status) as { at: string } | undefined)?.at;
+      return { card, since: at ?? card.submittedAt ?? card.updatedAt };
+    }).sort((a, b) => a.since.localeCompare(b.since));
+  }
+
   // ── Writing: the board ──────────────────────────────────
 
   createCards(actor: Actor, input: { project?: string | number | null; parent?: string | null; cards: NewCard[] }): { cards: Card[]; notes: string[]; said: Note[] } {

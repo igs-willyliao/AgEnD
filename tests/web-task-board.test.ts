@@ -489,3 +489,20 @@ describe("6. the agent learns why its work came back", () => {
     expect((await tool({ action: "update", id: card.uuid, priority: "high" }) as { notes?: string[] }).notes).toBeUndefined();
   });
 });
+
+describe("7. a reply to a Needs you prompt is the card's words, not an instance's input (step 3)", () => {
+  it("the admin's reply to the prompt stops there; any other message in the topic flows on to the instance", async () => {
+    const h = rig();
+    const replies: Array<{ replyTo?: string; userId: string; text: string }> = [];
+    h.s.needsYou = { handleReply: vi.fn((m: { replyTo?: string; userId: string; text: string }) => { replies.push(m); return m.replyTo === "prompt-1"; }), poke() {}, stop: async () => {} };
+    const routed: string[] = [];
+    h.s.topicCommands.handleInstanceCommand = vi.fn(async (msg: { text: string }) => { routed.push(msg.text); return true; });
+    const say = (over: Record<string, unknown>) => h.s.handleInboundMessage({ source: "telegram", adapterId: "owner", chatId: "G", threadId: "T0", messageId: `in-${Math.random()}`,
+      userId: "admin", username: "admin", text: "x", timestamp: new Date(), ...over });
+    await say({ replyTo: "prompt-1", text: "ties share a rank" });
+    await say({ replyTo: "some-other-message", text: "just chatting" });
+    await say({ text: "no reply at all" });
+    expect(replies.map((r) => [r.replyTo, r.text])).toEqual([["prompt-1", "ties share a rank"], ["some-other-message", "just chatting"]]);
+    expect(routed).toEqual(["just chatting", "no reply at all"]);
+  });
+});

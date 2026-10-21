@@ -105,6 +105,7 @@ import { routeToolCall } from "./channel/tool-router.js";
 import { Scheduler } from "./scheduler/index.js";
 import { boardActivity, boardCardLimit, boardToolAction } from "./task-board-tool.js";
 import { TaskBoardWaker } from "./task-board-waker.js";
+import { TaskBoardError, wrapUpGap, type Actor } from "./scheduler/task-board.js";
 import type { SchedulerDb } from "./scheduler/db.js";
 import type { Schedule, ScheduleRetry, ScheduleRetryDrop, SchedulerConfig } from "./scheduler/index.js";
 import { escapeTelegramHtml, scheduleClock, scheduleRetryLabel } from "./scheduler/retry-label.js";
@@ -9141,6 +9142,13 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       }
     }
 
+    // #2246 step 3: a fleet admin's reply to a Needs you Send back / Answer prompt is the card's reason or answer, not
+    // input for an instance. Only that exact reply, by the admin who clicked, while the prompt stands; all else flows on.
+    if (!msg.isBotMessage && msg.replyTo && this.needsYou?.handleReply({
+      adapterId: msg.adapterId, chatId: msg.chatId, ...(threadId !== undefined ? { threadId } : {}), replyTo: msg.replyTo,
+      messageId: msg.messageId, userId: msg.userId, ...(msg.username ? { username: msg.username } : {}), text: msg.text ?? "",
+    })) return;
+
     if (threadId == null) {
       // ── Telegram Classic Mode ──
       // Messages from chats other than the primary forum group are classic mode candidates.
@@ -13682,6 +13690,8 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         if (!this.deliveryOutbox?.isOpen) throw new Error("the delivery outbox is not open");
         return this.deliveryOutbox.acknowledge(deliveryId, by);
       },
+      tasks: () => this.needsYouTasks(),
+      taskAction: action => this.taskActionFromChat(action),
       settings: () => ({
         liveMessage: this.fleetConfig?.needs_you?.live_message !== false,
         dm: this.fleetConfig?.needs_you?.dm === true,
@@ -13691,6 +13701,48 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       log: (level, message, extra) => this.logger[level](extra ?? {}, message),
     });
     this.needsYou.start();
+  }
+
+  /**
+   * #2246 step 3: the task board's cards that wait for the person, for Needs you — under each card's assignee. A card an
+   * instance handed out is the web's only: that instance tells the person in the chat (its "to confirm" or "decide"
+   * wake), the list there does not repeat it.
+   */
+  private needsYouTasks(): import("./needs-you.js").TaskInput[] {
+    const board = this.scheduler?.db.board;
+    if (!board) return [];
+    return board.waitingForPerson().map(({ card, since }) => {
+      const gap = card.status === "review" ? wrapUpGap(card) : null;
+      const relayed = card.dispatcher?.kind === "instance" && card.dispatcher.name !== card.assignee && this.fleetConfig?.instances?.[card.dispatcher.name] != null;
+      return {
+        uuid: card.uuid, code: card.code, title: card.title, status: card.status as "review" | "blocked", version: card.version,
+        assignee: card.assignee, relayed, since: Date.parse(since) || 0, ...(gap ? { gap } : {}),
+        note: card.status === "blocked" ? card.blockedReason : gap ? t("needs.task_gap", [
+          gap.unchecked ? t("needs.task_gap_unchecked", gap.unchecked) : "", gap.noResult ? t("needs.task_gap_no_result") : "",
+        ].filter(Boolean).join(t("needs.task_gap_join"))) : "",
+      };
+    });
+  }
+
+  /**
+   * #2246 step 3: the person's move on a card from a chat's Needs you list — a fleet admin of that world (checked by the
+   * hub), acting as the person, through the board's rules, at the version the button showed.
+   */
+  private taskActionFromChat(action: import("./needs-you-hub.js").TaskAction): { ok: boolean; message: string } {
+    const board = this.scheduler?.db.board;
+    if (!board) return { ok: false, message: t("needs.task_board_closed") };
+    const person: Actor = { kind: "person", name: action.by.username || `${action.by.platform}:${action.by.userId}` };
+    try {
+      if (action.verb === "confirm") board.moveCard(person, action.code, "done", { version: action.version });
+      else if (action.verb === "back") board.moveCard(person, action.code, "claimed", { version: action.version, reason: action.text });
+      else board.moveCard(person, action.code, "claimed", { version: action.version, comment: action.text });
+      const done = { confirm: "needs.task_confirmed", back: "needs.task_sent_back", answer: "needs.task_answered" }[action.verb];
+      this.logger.info({ code: action.code, verb: action.verb, by: `${action.by.platform}:${action.by.userId}` }, "Task board: the person moved a card from the chat");
+      return { ok: true, message: t(done, action.code) };
+    } catch (err) {
+      if (err instanceof TaskBoardError && err.code === "conflict") return { ok: false, message: t("needs.task_changed", action.code) };
+      return { ok: false, message: t("needs.task_refused", action.code, (err as Error).message) };
+    }
   }
 
   /** The prompts open on the dashboard right now (a page that loads after one was posted asks for them). */
@@ -16623,6 +16675,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     db.board.onChange(({ rev, ids, projects, wakes }) => {
       this.emitSseEvent("tasks", { rev, ids, projects });
       waker.note(wakes);
+      if (ids.length) this.needsYou?.poke();                       // step 3: cards waiting for the person are Needs you items
     });
   }
 
