@@ -44,7 +44,7 @@ describe("the installer's long steps and console guards (static)", () => {
   });
   it("each step reads its output in the encoding it is known to use", () => {
     expect(code.match(/-Encoding oem -File "dism\.exe"/g)).toHaveLength(2);
-    expect(code.match(/-Encoding utf16 -File "wsl\.exe"/g)).toHaveLength(3);    // wsl.exe's own commands, WSL_UTF8 removed
+    expect(code.match(/-Encoding utf16 -File "wsl\.exe"/g)).toHaveLength(5);    // wsl.exe's own commands, WSL_UTF8 removed (update ×2, install, the AgEnD distro's install and import)
     expect(code).not.toMatch(/Get-WslOutputEncoding/);                          // no probe of which wsl.exe (#2228 review)
   });
   it("a plain notice at the start, and again at the login and quickstart steps", () => {
@@ -183,6 +183,12 @@ Write-Output ("STOP=" + $stop + " ALIVE=" + (-not $p.HasExited)); $p.Kill()`, "\
     expect(keep.out).toContain("Ctrl+C 是「停止」，不是「複製」");
     expect(keep.out).toContain("安裝還在背景繼續進行，沒有中斷。");
     expect(keep.out).toContain("STOP=False ALIVE=True");
+    for (const unclear of ["yes\n", "y/N\n"]) {                                    // only a lone y stops (#2265 review)
+      const more = withHelpers(`$p = Start-Process sleep -ArgumentList 30 -PassThru
+$stop = Confirm-StopInstall $p
+Write-Output ("STOP=" + $stop + " ALIVE=" + (-not $p.HasExited)); $p.Kill()`, unclear);
+      expect(more.out).toContain("STOP=False ALIVE=True");
+    }
     const stop = withHelpers(`$p = Start-Process sleep -ArgumentList 30 -PassThru
 $stop = Confirm-StopInstall $p
 Start-Sleep -Milliseconds 300

@@ -477,6 +477,8 @@ State combines paused, stopped or crashed with the execution state (see [Instanc
 Besides `/status`, these work from chat (on Discord as slash commands; on Telegram the fleet-wide ones are answered in the General topic). See [commands](commands.md) for who may use each.
 
 - **`/usage`** (anyone) — AI subscription usage for the CLIs logged in on this machine: Claude, Codex, Muse, Grok, Kiro and Antigravity. A backend with [credential profiles](#credential-profiles-and-a-second-subscription) gets one row per subscription. Agents read the same data with `get_usage`.
+
+  **A failed read keeps the last known numbers (#2236, 2.3 beta).** When a read fails — an expired token, a rate limit, a network blip or any other error — the row stays visible with the numbers from the last successful read (up to a week old). The numbers are greyed and a line explains: **expired · cached at 14:05**, **not updated** or **couldn't read**; for an expiry or error, what to do (for example "run `agy` once") is on a second line. A window whose reset time has already passed shows **reset since …** instead of a stale percentage. A provider that has never been read successfully still shows its error; a good read clears the mark. After a restart the last-good numbers come from `usage-last-good.json` in `AGEND_HOME`. `get_usage` rows carry `stale`, `cachedAt` and `staleCause` on a stale row; a metric whose window reset carries `resetPassed`.
 - **`/doctor`** (fleet admin) — health diagnostics in six sections: Prerequisites, Service, Fleet, Channel gateways, MCP IPC and Resources, each check `ok`, `warn` or `error`.
 - **`/sysinfo`** (anyone) — fleet uptime and memory, instance counts, system memory, and each backend CLI's version.
 - **`/model`** (channel admin) — switch the instance's model from a menu (on Telegram also `/model <name>`). From 2.2.5 the menu is the catalog of the account the instance runs on (a Claude Code [credential profile](#credential-profiles-and-a-second-subscription) has its own), and the model it runs is always a choice: one its CLI does not list comes first, marked "current — not in this CLI's list". See [Backend availability and model lists](#backend-availability-and-model-lists-225).
@@ -700,6 +702,8 @@ Sign in with a one-time code: send `/web` (fleet admin) or run `agend web` on th
 
 **Public link.** For a phone that cannot reach the machine, a `claude-code` or `kiro-cli` login offers a temporary public https link through a Cloudflare Quick Tunnel: the confirmation has **I understand (temporary public link)**, **I understand (local network)** and **Cancel**, and the first button is the consent, once per login. A `cloudflared` on `PATH` is used if there is one; otherwise AgEnD downloads Cloudflare's build into `~/.agend/bin/` once, pinned and checked against a SHA256 it ships with. The link and the access token are sent to you as two private messages, never in the channel, and the tunnel is stopped when the login ends in any way. Cloudflare terminates TLS, so it can see that terminal. `web_terminal.tunnel.allow_public: false` turns the option off for the host. Details: [configuration](configuration.md#finishing-a-login-away-from-the-machine-public-link).
 
+**From the web dashboard (2.3, #2233).** A fleet admin signed in to the dashboard on this machine or its network (not over the public link, and never as a guest) can do the same without any chat connection: **Settings → Agents → Sign-ins** lists each backend's login and each credential profile an agent uses, with **Sign in**; the web `/backend` picker offers **Sign in to <backend>** for one that is not signed in; and **Needs you** offers **Sign in** on an agent paused for sign-in. The dialog runs the same flow: a device code is shown in the dialog; a browser-terminal login shows **Open the sign-in terminal** and its one-time access code, to that browser session only (no DM is involved, so a web-only fleet needs no bot). The same checks, limits and 10-minute window apply, a public link is still opt-in per sign-in, and while it runs every admin page says so, with **Open** (the browser that started it sees the link and code, the others only who and where, and may cancel it). A sign-in whose browser session ends is cancelled. A CLI that is not installed is not installed from here: the dialog gives its install command.
+
 After a successful login, the backend's running instances are restarted to pick up the new credential. `/install-cli` is a leftover typed alias: it still works, says it moved, and runs `/login` with the same argument; it is in no command menu.
 
 ## Credential profiles and a second subscription
@@ -778,7 +782,7 @@ When `project_roots` is configured in `fleet.yaml`, `create_instance` validates 
 
 ## reply_to_text injection
 
-When a user replies to a previous message in Telegram, the quoted text is included in the formatted message delivered to the agent. This gives agents context about what the user is referring to.
+When a user replies to a previous message in Telegram, Discord or the web chat (#2272), the quoted text is included in the formatted message delivered to the agent as `(reply_to: "…")`. This gives agents context about what the user is referring to.
 
 ## delete_instance team cleanup
 
@@ -937,10 +941,10 @@ Configure parallel instance startup with concurrency limits:
 defaults:
   startup:
     concurrency: 3        # max instances starting simultaneously
-    stagger_delay_ms: 2000 # delay between groups
+    stagger_delay_ms: 2000 # spacing between outer admissions (ms)
 ```
 
-Instances sharing the same working directory are serialized within a group to avoid config file races.
+Instances sharing the same working directory are serialized to avoid config file races. The stagger spaces outer lifecycle admissions and standalone spawns. At normal pressure, a nested CLI spawn reuses its outer reservation, so physical spawns may coincide. Memory-pressure and storm limits still apply.
 
 ## Kiro instances in one working directory
 

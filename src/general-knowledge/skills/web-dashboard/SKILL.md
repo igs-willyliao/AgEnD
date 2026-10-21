@@ -116,6 +116,12 @@ read from the bytes: PNG/JPEG/GIF/WebP are photos, PDF a document, UTF-8 a text 
 binaries, `.html`/`.svg` and other markup) is stored as **download-only**. The agent receives the path in its
 workspace `inbox/`; an unused upload is deleted after 30 minutes.
 
+**Replying to a message (#2272).**
+- **How:** the ↩ on hover, a right-click (Reply / Copy text / Copy link), a swipe left (as in Telegram; a swipe right still opens the drawer) or long-press on a phone, or R on a focused message. A bar above the composer shows what is answered; ✕ or Esc cancels.
+- **The sent bubble** shows the quote, and clicking it jumps to the original.
+- **The agent** gets `(reply_to: "…")`, exactly as from a Discord or Telegram reply, read by the server from the quoted message (one line, at most 500 characters). Nothing new for guests: they reply only to what they can see.
+- **The channel echo** quotes only a message that was already in that channel.
+
 **In replies.** Images inline; video and audio play inline; Markdown, CSV, JSON, code and text files get a **Show**
 card (200 lines, then "Show all … lines"); other files download. Code blocks have a language tag, **Wrap** and
 **Copy**, and fold after 30 lines. Each reply has **Copy this reply**. Markdown: headings, lists, quotes, bold/italic/
@@ -162,7 +168,7 @@ tab title. Items, grouped by instance, oldest first:
 - deliveries from the last 24 h: "Could not confirm delivery", "Delivery failed" (source → target · kind).
 
 A prompt shows its own answer buttons (first answer wins); a delivery has **Acknowledge** (clears it everywhere);
-every item has **Open chat**. **Notify me on this device** (Turn on / Turn off) gives desktop notifications while the
+"Paused: sign-in needed" has **Sign in** when the dashboard can run that login (#2233); every item has **Open chat**. **Notify me on this device** (Turn on / Turn off) gives desktop notifications while the
 tab is hidden — per browser, not on phones or plain-HTTP addresses. Config: `needs_you.live_message` (default on),
 `needs_you.dm` (default off).
 
@@ -248,6 +254,11 @@ Codex, Muse, Grok, Kiro, Antigravity; every Claude login on the host, used or no
 rows, "binding" on the window that will stop you, **Extra usage** in dollars. "high" at 70%, "near limit" at 90%.
 Refreshes every 60 s while open; **Refresh** forces it (at most once per 30 s); **Move up / Move down** reorders rows.
 `web.usage_panel: false` hides the rail and dialog (the `/usage` chat command and `get_usage` still work).
+**A failed read keeps the last numbers** (#2236 follow-up): an expired token, a rate limit, a network blip or any other
+error shows the numbers from the last good read (up to a week old), greyed, with "expired · cached at 14:05" (or "not
+updated" / "couldn't read") and what to do under it; a window that has reset since says "reset since …" with no number.
+`get_usage` rows carry `stale: true`, `cachedAt`, `staleCause` (expired / transient / error) and `resetPassed` on such
+metrics; read them as old. A provider never read successfully still shows its error. A good read clears the mark.
 
 **Profiles and plan badges.** Each Claude credential profile has its own row: the card says "Claude" with the
 profile on its own line (the API and chat call it "Claude (<profile>)"); a shared row appears only while some
@@ -330,6 +341,16 @@ link, an unverified browser or a change that needs the host CLI. After a failure
 | Chat tour (this device) | replays the chat tour | browser |
 
 **Web appearance** — see [Web appearance](#web-appearance) for the cards and what they mean.
+
+**Signing a backend in (#2233)** — local admin sessions only (never a guest or the public link): Settings → Agents →
+**Sign-ins** (each backend's login and each credential profile an agent uses: state, **Sign in** / **Sign in again**,
+or the host command / install command where the dashboard cannot), the web `/backend` picker's **Sign in to
+<backend>** on a "not signed in" choice, and Needs you's **Sign in**. The dialog: the pre-check's question (still
+signed in? kiro logs out first; **Use a temporary public link** where allowed), then a device code, or **Open the
+sign-in terminal** + its one-time access code (this browser only, no DM). While it runs every admin page shows
+"Signing in to X (started on <device>)" with **Open**; another browser sees no code and may **Cancel sign-in**. Ends
+when the browser session ends. A missing CLI is not installed here (the dialog says the install command). agy and
+opencode: no dashboard sign-in. Config: `web_terminal.*` (as `/login`).
 
 **Agents** — **New agent**; per agent **Settings**, **Pause / Wake**, **Start / Stop** (direct), ⋯ **Delete agent**
 (staged; on Apply it waits for a fleet admin's confirmation in General, then the agent is stopped and removed, as

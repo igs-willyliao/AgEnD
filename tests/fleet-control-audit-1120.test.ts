@@ -302,7 +302,8 @@ describe("the service-level commands, behind inert stubs", () => {
       const path = join(inert, "bin", command);
       // npm also answers `prefix -g` (the scratch dir): the update locks that prefix before it installs (#1450 C1).
       // …and `root -g` (nothing installed there): the update copies any installed package aside first (#1450 C6).
-      const prefixAnswer = command === "npm" ? `[ "$1 $2" = "prefix -g" ] && { echo '${inert}'; exit 0; }\n[ "$1 $2" = "root -g" ] && { echo '${join(inert, "lib", "node_modules")}'; exit 0; }\n` : "";
+      // #2264: …and names a newer release that ships its own installer, so the update hands over through `npm exec`.
+      const prefixAnswer = command === "npm" ? `[ "$1 $2" = "prefix -g" ] && { echo '${inert}'; exit 0; }\n[ "$1 $2" = "root -g" ] && { echo '${join(inert, "lib", "node_modules")}'; exit 0; }\ncase "$*" in "view @songsid/agend@"*" version") echo 99.0.0; exit 0;; "view @songsid/agend@"*" bin --json") echo "\${NPM_BIN_ANSWER:-{\\"agend-install\\":\\"launcher/agend-install.cjs\\"}}"; exit 0;; esac\n` : "";
       writeFileSync(path, `#!/bin/sh\n${prefixAnswer}echo "${command} $@ ORIGIN=$AGEND_RESTART_ORIGIN" >> "${join(inert, "calls")}"\nexit 1\n`);
       chmodSync(path, 0o755);
     }
@@ -335,8 +336,9 @@ describe("the service-level commands, behind inert stubs", () => {
 
   it("an internal origin lets the command through but is not handed to what it starts", async () => {
     await run(["update"], "agend-leader", { AGEND_RESTART_ORIGIN: "slash /update by discord:admin" });
-    expect(calls()).toContain("npm install");                       // it went ahead without --yes
-    expect(calls()).toMatch(/npm install .*ORIGIN=\n/);              // …and npm, like any replacement fleet, saw no marker
+    // #2264: the update hands the install to the target's installer through `npm exec`.
+    expect(calls()).toContain("npm exec");                          // it went ahead without --yes
+    expect(calls()).toMatch(/npm exec .*ORIGIN=agend-update\n/);    // …npm is the update's own child (its marker), never the caller's origin
     expect(calls()).not.toContain("slash /update");
   });
 
@@ -363,7 +365,15 @@ describe("the service-level commands, behind inert stubs", () => {
 
   it("control: with --yes `update` does reach the (stubbed) npm", async () => {
     await run(["update", "--yes"], "agend-leader");
-    expect(calls()).toContain("npm install");
+    expect(calls()).toContain("npm exec");   // #2264: the target's installer, through npm exec
+  });
+
+  // #2264 review (Prism r1 P2): `npm exec --package <a release without agend-install>` runs whatever agend-install PATH
+  // has. A target from before the installer is updated by this updater (the compatibility path) — never through npm exec.
+  it("a target without its own installer (an older release) is never run through `npm exec`", async () => {
+    await run(["update", "--yes"], "agend-leader", { NPM_BIN_ANSWER: '{"agend":"launcher/agend","agend-agent":"launcher/agend-agent"}' });
+    expect(calls()).not.toContain("npm exec");
+    expect(calls()).toMatch(/npm install -g @songsid\/agend@99\.0\.0/);
   });
 
   it("an interactive user is not asked: `stop` just looks for a service", async () => {

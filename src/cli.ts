@@ -17,6 +17,7 @@ import { checkNodeVersion } from "./node-version-guard.js";
 checkNodeVersion();
 
 import { Command } from "commander";
+import { registerBugReportCommand } from "./bug-report-cli.js";
 import { join, dirname } from "node:path";
 import { SchedulerDb } from "./scheduler/db.js";
 import { Cron } from "croner";
@@ -55,7 +56,7 @@ import {
   pidAlive,
   processStartMs,
 } from "./update-check.js";
-import { clearUpdateMarker, markUpdateInProgress, setUpdateProgressStage, type UpdateReceipt } from "./update-marker.js";
+import { clearUpdateMarker, markUpdateInProgress, readUpdateProgress, setUpdateProgressStage, type UpdateReceipt } from "./update-marker.js";
 import { describeSignalSource, forceAllowed, gateFleetControl, recordInstanceControl, withOrigin } from "./fleet-control-audit.js";
 import { FLEET_STOP_TIMEOUT_MS, stopDetachedOwner, systemdStopTimeoutMs, detachedProcessStart, detachedProcessExited, type DetachedOwnerState } from "./fleet-stop-budget.js";
 import { acquireFleetLock, isFleetStartCommandLine, readProcessCommandLine, releaseProcessFleetLock, setProcessFleetLock } from "./fleet-lock.js";
@@ -165,6 +166,8 @@ program
   // The root's own options only before a subcommand: otherwise `agend update --version 2.1.9` is read as
   // `agend --version`, prints this version and installs nothing.
   .enablePositionalOptions();
+
+registerBugReportCommand(program, pkgVersion);
 
 function signalFleetReload(): void {
   const pidPath = join(DATA_DIR, "fleet.pid");
@@ -1453,6 +1456,12 @@ program
       // the cleanup write later can prove it still owns the marker (checklist
       // 3/5). A missed capture only skips the marker write; retire still runs.
       let cleanupReceipt: UpdateReceipt | null = null;
+      // #2264 review: the old system copy is retired only for a confirmed 2.1-era layout — the copy this updater runs
+      // from is a 2.1.x release (2.1's updater left it there). Never from "nvm" or "root" alone: a 2.2+ copy stays.
+      if (verified.retireSystemCopy && !/^2\.1\./.test(pkgVersion)) {
+        console.log(`  Note: the system install (v${pkgVersion}) is kept; only a 2.1-era copy is retired after a move to nvm.`);
+        delete verified.retireSystemCopy;
+      }
       if (verified.retireSystemCopy) {
         try {
           const { markCleanupPending } = await import("./update-marker.js");
@@ -1528,6 +1537,8 @@ program
         const { planPath } = await import("./service-plan.js");
         planDeps().removeFile(planPath(DATA_DIR));
       }
+      // #1853: in a WSL terminal without the Windows desktop shortcuts, say once how to make them (never makes them).
+      if (outcome.ok) await import("./windows-shortcuts.js").then(m => m.printUpdateShortcutsHint(DATA_DIR)).catch(() => { /* a hint never fails an update */ });
       if (outcome.ok && outcome.via === "launchd-activation") {
         console.log("  ✓ Service restarted (launchd loaded the verified job)");
         // The new fleet clears the update marker once it is up.
@@ -1609,6 +1620,7 @@ program
       }
       console.log(`\n  ✓ Already up to date (v${pkgVersion})\n`);
       setUpdateProgressStage(DATA_DIR, "complete", { version: pkgVersion });
+      await import("./windows-shortcuts.js").then(m => m.printUpdateShortcutsHint(DATA_DIR)).catch(() => { /* a hint never fails an update */ });
       return;
     }
 
@@ -1650,6 +1662,43 @@ program
         return;
       }
       if (verdict.kind === "unknown") console.log(verdict.note);
+    }
+
+    // ── #2264: the target release installs itself ──
+    // `agend update` only chooses the version; the install — repair, `npm install -g`, proof, service, restart, the
+    // chat's progress — is that release's own installer (launcher/agend-install.cjs), fetched pinned by npm with its
+    // integrity checks. So every update runs the NEWEST install logic, never this (possibly old) package's, and the
+    // one-liner runs the same program. The code below this branch is the compatibility path, unchanged: for a prefix
+    // that needs sudo (the nvm route), and for a target from before the installer.
+    // Only a known target that ships the installer runs it: `npm exec --package <a release without agend-install>` would
+    // run whatever agend-install PATH has (#2264 review). An older target, or one npm cannot describe, takes the
+    // compatibility path below; `--target` makes any other installer refuse.
+    const shipsInstaller = (): boolean => {
+      const viewed = spawnSync("npm", ["view", pkg, "bin", "--json"], { encoding: "utf-8", timeout: 60_000, stdio: ["ignore", "pipe", "ignore"] });
+      try {
+        const parsed: unknown = JSON.parse(viewed.stdout || "null");
+        const bin = Array.isArray(parsed) ? parsed[parsed.length - 1] : parsed;
+        return viewed.status === 0 && !!bin && typeof bin === "object" && Object.hasOwn(bin, "agend-install");
+      } catch { return false; }
+    };
+    const viaInstaller = !needsSudo && targetVersion !== null && shipsInstaller();
+    if (!needsSudo && !viaInstaller) console.log(`  ℹ ${pkg} has no installer of its own (a release from before #2264); this updater installs it.`);
+    if (viaInstaller) {
+      console.log(`\n  Updating AgEnD v${pkgVersion} → v${targetVersion} (its own installer)...\n`);
+      markUpdateInProgress(DATA_DIR);
+      setUpdateProgressStage(DATA_DIR, "downloading", { version: targetVersion! });
+      // AGEND_UPDATE_OWNER_PID: the marker this process just wrote is the installer's to carry on (and no one else's).
+      const installer = spawnSync("npm", ["exec", "--yes", "--package", pkg, "--", "agend-install", "--upgrade", "--target", targetVersion!], {
+        stdio: "inherit", env: { ...withOrigin("agend-update"), AGEND_UPDATE_OWNER_PID: String(process.pid) },
+      });
+      if (installer.status === 0 || installer.status === 75) { process.exitCode = installer.status ?? 0; return; }
+      // The installer records its own failure; one that never started (npm could not fetch it) is recorded here.
+      const progress = readUpdateProgress(DATA_DIR)?.progress;
+      if (progress && progress.stage !== "failed" && progress.stage !== "complete") {
+        setUpdateProgressStage(DATA_DIR, "failed", { error: `the installer for ${pkg} did not run (npm exec exited ${installer.status ?? installer.signal ?? installer.error?.message}); nothing was changed` });
+      }
+      process.exitCode = installer.status || 1;
+      return;
     }
 
     if (targetVersion) {
@@ -1852,6 +1901,20 @@ program
     } else {
       console.log(t("install.updated"));
     }
+  });
+
+program
+  .command("shortcuts")
+  .description("WSL: create or update the Windows desktop shortcuts (the dashboard and restart)")
+  .action(async () => {
+    // #1853: for an install that predates the installer's shortcuts, or that is only ever updated with `agend update`.
+    const { runShortcuts, realShortcutsDeps } = await import("./windows-shortcuts.js");
+    const { spawnSync } = await import("node:child_process");
+    const { userInfo } = await import("node:os");
+    process.exitCode = await runShortcuts(realShortcutsDeps(DATA_DIR, userInfo().username, (command, args) => {
+      const r = spawnSync(command, args, { encoding: "utf-8", timeout: 120_000, stdio: ["ignore", "pipe", "pipe"] });
+      return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "", error: r.error };
+    }));
   });
 
 program
@@ -2518,9 +2581,18 @@ program
   program
   .command("validate")
   .description("Validate fleet.yaml and classicBot.yaml")
-  .action(async () => {
-    const { validateFleetConfig, validateClassicBotConfig } = await import("./config-validator.js");
+  .option("--connections", "Only print how many chat connections fleet.yaml has, as CONNECTIONS=<n> (for scripts; CONNECTIONS=unknown and exit 1 when it cannot be read)")
+  .action(async (opts: { connections?: boolean }) => {
+    const { validateFleetConfig, validateClassicBotConfig, configuredConnectionCount } = await import("./config-validator.js");
     const yaml = (await import("js-yaml")).default;
+    if (opts.connections) {
+      // #2233: the Windows installer's question — did the setup page make a web-only fleet? Parsed, never grepped.
+      let count: number | null = null;
+      try { count = configuredConnectionCount(yaml.load(readFileSync(FLEET_CONFIG_PATH, "utf-8"))); } catch { count = null; }
+      console.log(`CONNECTIONS=${count ?? "unknown"}`);
+      if (count === null) process.exit(1);
+      return;
+    }
     const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
     const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
     const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
@@ -2840,7 +2912,8 @@ async function resolveInstance(query: string | undefined, config: import("./type
     if (process.stdin.isTTY && process.stdout.isTTY) {
       console.log(`"${query}" matches multiple instances:`);
       const { ambiguityLine } = await import("./ls-attach-resolve.js");
-      const maxNameW = Math.max(...result.candidates.map(c => c.realName.length));
+      const { computeLsNameWidth: cnw } = await import("./ls-rows.js");
+      const maxNameW = cnw(result.candidates.map(c => c.realName), 0);
       for (const c of result.candidates) {
         console.log(ambiguityLine(c, maxNameW));
       }
@@ -2873,7 +2946,8 @@ async function interactivePicker(candidates: import("./ls-attach-resolve.js").Ca
   const defaultIdx = pickerDefaultIdx(ordered);
 
   const { pickerLine } = await import("./ls-attach-resolve.js");
-  const maxNameW = Math.max(...ordered.map(c => c.realName.length));
+  const { computeLsNameWidth: cnwPicker } = await import("./ls-rows.js");
+  const maxNameW = cnwPicker(ordered.map(c => c.realName), 0);
 
   console.log("Select an instance:");
   for (const c of ordered) {
@@ -3071,7 +3145,7 @@ async function lsAction(opts: { json?: boolean; namesOnly?: boolean; resources?:
 
     // Row collection runs concurrently (see ls-rows.ts): the per-instance
     // tmux captures overlap instead of stacking their 2s bounds serially.
-    const { collectLsRows, capturePaneAsync, formatTimeSince, lsStatusIcon, lsStatusLabel, displayWidth } =
+    const { collectLsRows, capturePaneAsync, formatTimeSince, lsStatusIcon, lsStatusLabel, displayWidth, computeLsNameWidth, padToDisplayWidth } =
       await import("./ls-rows.js");
     const { getTmuxSocketName } = await import("./paths.js");
     const socketName = getTmuxSocketName();
@@ -3191,7 +3265,7 @@ async function lsAction(opts: { json?: boolean; namesOnly?: boolean; resources?:
     // Columns: # (global row number), Name (real, full, copyable), then the rest.
     // Display name (if set) appears at the end of the row as context — secondary.
     const numW = 3;
-    const nameW = Math.max(16, ...displayRows.map(r => r.name.length + 1));
+    const nameW = computeLsNameWidth(displayRows.map(r => r.name));
     const backendW = 14;
     const statusW = 12;
     const teamW = 20;
@@ -3221,7 +3295,7 @@ async function lsAction(opts: { json?: boolean; namesOnly?: boolean; resources?:
 
       console.log(
         String(r.globalIdx).padEnd(numW) +
-        r.name.padEnd(nameW) +
+        padToDisplayWidth(r.name, nameW) +
         r.backend.padEnd(backendW) +
         statusIcon(r.status, r.idle, (r as any).state) + " " + statusLabel(r.status, r.idle, (r as any).state).padEnd(statusW - 2) +
         padDisplay(teamStr, teamW) +

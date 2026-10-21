@@ -245,7 +245,8 @@ import { Delegations, TrafficLog, trafficItem, type Delegation, type TrafficItem
 import { installedChannel, updateNoticeKey } from "./update-check.js";
 import { resolveInstalledAgend } from "./update-dispatch.js";
 import { resolveUpdateLaunch, openUpdateLog, updateLogPath, watchUpdateLaunch } from "./update-launch.js";
-import { admitProfileLogin, LoginController, LOGIN_TOKEN_RESEND_PREFIX, POST_LOGIN_RECOVERY_DEADLINE_MS, type PostLoginRecovery } from "./login-controller.js";
+import { admitProfileLogin, LoginController, LOGIN_TOKEN_RESEND_PREFIX, POST_LOGIN_RECOVERY_DEADLINE_MS, type PostLoginRecovery, type LoginChat, type LoginStartOptions } from "./login-controller.js";
+import { WebBackendLogins, dashboardSignInSupported, type SignInTarget } from "./web-backend-login.js";
 import { runBeforeDeadline } from "./deadline.js";
 import { LoginWindowLock } from "./login-window-lock.js";
 import { handleSettingsRequest, type RawConfigPatch } from "./settings-api.js";
@@ -362,7 +363,7 @@ type ReconcileObserver = (
   status: ApplyTargetStatus,
   error?: string,
 ) => void;
-import { CHAT_PROFILE_LOGIN_BACKENDS, credentialHomeSpec, credentialProfileHome, credentialProfileLogin, credentialProfileStoreHome, credentialSwitchCarriesConversation, credentialSwitchStartsFresh, instanceCredentialProfile } from "./backend/credential-profile.js";
+import { CHAT_PROFILE_LOGIN_BACKENDS, credentialHomeSpec, credentialProfileHome, credentialProfileLogin, credentialProfileLoginCommand, credentialProfileStoreHome, credentialSwitchCarriesConversation, credentialSwitchStartsFresh, instanceCredentialProfile } from "./backend/credential-profile.js";
 import { carryClaudeConversation, type CarryResult } from "./backend/claude-carry.js";
 import { mergeBackendOptions, profileKey, profileName, profileOf, type ClassicProfile } from "./classic-bindings.js";
 import {
@@ -397,6 +398,15 @@ import { getTmuxSession } from "./config.js";
 
 /** #2163: `classic` — a ClassicBot room's agent: only the skills about its own look and the dashboard. */
 type ManagedSkillRole = "general" | "worker" | "classic";
+
+// Closed migration cohort: these 11 names existed immediately before the first
+// managed-skill publisher (a1ac499f; parent e267e684). Never grow this set when
+// adding a bundled skill: its new name is not proof of old AgEnD ownership.
+const PRE_MANIFEST_KIRO_SKILLS = new Set([
+  "backend-providers", "cross-instance-messaging", "fleet-config", "fleet-health",
+  "fleet-restart", "instance-lifecycle", "model-discovery", "multi-channel",
+  "scheduling", "session-management", "tui-effort",
+]);
 
 export function resolveReplyThreadId(
   argsThreadId: unknown,
@@ -5183,8 +5193,8 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
 
   /**
    * Start instances with configurable concurrency and stagger delay.
-   * Instances sharing the same working_directory are serialized within a group
-   * to avoid config file races. Stagger delay is group-to-group, not instance-to-instance.
+   * Instances sharing the same working_directory are serialized to avoid
+   * config file races. Stagger applies between outer lifecycle admissions.
    * TODO: per-instance startup timeout (existing issue, not introduced here)
    */
   private async startInstancesWithConcurrency(
@@ -5210,14 +5220,27 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         totalInstances: runnableEntries.length,
       }, "Adaptive startup concurrency");
     }
+    const startedAt = performance.now();
+    let active = 0, peakConcurrentStarts = 0, readyInstances = 0;
     await Promise.all(runnableEntries.map(([name, config]) => this.spawnGate.run({
       instanceName: name,
       workingDirectory: config.working_directory,
       reason: "startup",
       stage: "lifecycle",
     }, async () => {
-      if (await this.startInstanceUnattended(name, config, topicMode, "instance")) onReady?.(name);
+      peakConcurrentStarts = Math.max(peakConcurrentStarts, ++active);
+      try {
+        if (await this.startInstanceUnattended(name, config, topicMode, "instance")) {
+          readyInstances++;
+          onReady?.(name);
+        }
+      } finally { active--; }
     })));
+    this.logger.info({
+      totalInstances: runnableEntries.length, readyInstances,
+      elapsedSeconds: Math.round((performance.now() - startedAt) / 100) / 10,
+      peakConcurrentStarts,
+    }, "Fleet startup batch completed");
   }
 
   /**
@@ -7576,6 +7599,10 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       // a plain boot — nothing was stopped by an operation, report nothing.
       const backgroundWorkEndedNames = this.collectBackgroundWorkEndedNames(
         configuredNames, pendingUpdateProgress?.startedAt ?? null);
+      // #2264: an update whose fleet comes back on another version did not land — say so in its final message (the
+      // version it aimed for, the one running, and the one repair), never just "updated".
+      const aimedAt = pendingProgressOperation === "update" ? pendingUpdateProgress?.progress.version : undefined;
+      const notLanded = aimedAt && agendVersion !== "unknown" && aimedAt !== agendVersion ? t("update.not_landed", aimedAt, agendVersion) : null;
       const completionSummary: RestartProgressSummary = {
         running: started,
         total,
@@ -7585,7 +7612,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         backgroundWorkEndedNames,
         ...(cleanupOutcome && "render" in cleanupOutcome
           ? { warningText: cleanupOutcome.render.warning, warningCommand: cleanupOutcome.render.cleanupCommand }
-          : {}),
+          : notLanded ? { warningText: notLanded } : {}),
       };
       const progressCompleted = await startupProgress.finish(completionSummary);
       // Armed only after the completion posted: an append racing ahead of it would be overwritten by it.
@@ -13575,6 +13602,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         interactionSummary: p.interaction_summary ?? null,
         pauseReason, pausedAt,
         crashedAt: crashed ? (this.needsCrashedAt.get(name) ?? null) : null,
+        signIn: pauseReason === "auth" ? this.signInFor(name) : null,
       });
     }
     return out;
@@ -14341,7 +14369,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         const current = this.resolveInstanceEffort(instance).effort;
         return { current, options: levels.map(l => ({ id: l, label: this.effortChoiceLabel(l, current) })) };
       },
-      backendStep: async (instance, args) => {
+      backendStep: async (instance, args, stepOpts) => {
         const refusal = this.backendCommandRefusal(instance);
         if (refusal) return { error: refusal };
         // The cached model lists only, as the web's /model: never a live probe on this path.
@@ -14349,7 +14377,13 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         if (step.kind === "refuse") return step.noop ? { text: step.text } : { error: step.text };
         if (step.kind === "choose") {
           const id = (token: string) => joinBackendArgs([...step.args, token]);
-          return { choices: { prompt: step.text, current: step.current === null ? null : id(step.current), options: step.choices.map(c => ({ id: id(c.token), label: c.label, ...(c.disabled ? { disabled: c.disabled } : {}) })) } };
+          return { choices: { prompt: step.text, current: step.current === null ? null : id(step.current), options: step.choices.map(c => {
+            // #2233: the web offers Sign in beside it, so its reason is no longer "use /login".
+            // Not over the public link: Sign in is refused there, so the choice keeps its "(use /login)" (#2262 review).
+            const signIn = c.signIn && !stepOpts?.publicLink && dashboardSignInSupported(c.signIn) ? c.signIn : null;
+            const disabled = signIn ? t("backend.reason_not_signed_in_web") : c.disabled;
+            return { id: id(c.token), label: signIn ? `${c.token} — ${disabled}` : c.label, ...(disabled ? { disabled } : {}), ...(signIn ? { signIn } : {}) };
+          }) } };
         }
         const now = performance.now();
         for (const [k, v] of this.webBackendTokens) if (v.deadline < now) this.webBackendTokens.delete(k);
@@ -15649,6 +15683,85 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     return this.loginController;
   }
 
+  /** #2233: sign-ins started from the web dashboard (local admin sessions), on the same controller as chat's. */
+  private webBackendLoginsInstance: WebBackendLogins | null = null;
+  get webBackendLogins(): WebBackendLogins {
+    this.webBackendLoginsInstance ??= new WebBackendLogins({
+      isLocalAdmin: handle => this.isLocalAdminSession(handle),
+      start: (backend, chat, opts) => this.startWebDashboardLogin(backend, chat, opts),
+      accessToken: sink => this.loginController?.webAccessToken(sink) ?? null,
+      isActiveFor: sink => this.loginController?.isActiveFor(sink) ?? false,
+      cancelFor: sink => this.loginController?.cancelFor(sink) ?? Promise.resolve(false),
+      cancel: () => this.cancelLoginSession(),
+      notice: ({ shown, label, handle }) => this.notifyFleetError(t("login.web_dashboard_notice", shown, label, handle.slice(0, 8))),
+      // No details in the event: each page reads its own view (GET /ui/backend-login), as its session may see it.
+      changed: () => broadcastSseEvent(this.sseClients, "backend_login", {}, err => this.logger.debug({ err }, "backend_login event failed")),
+    });
+    return this.webBackendLoginsInstance;
+  }
+
+  /** #2233: the login a paused-for-sign-in instance needs, when the dashboard can sign it in. */
+  private signInFor(name: string): { backend: string; profile?: string } | null {
+    const backend = this.backendNameForInstance(name);
+    const profile = this.credentialProfileOf(name, backend);
+    return dashboardSignInSupported(backend, profile) ? { backend, ...(profile ? { profile } : {}) } : null;
+  }
+
+  /**
+   * #2233: Settings → Agents' sign-in list — every backend's default login as the availability snapshot has it, then
+   * each credential profile an agent uses (its own login state, read offline).
+   */
+  backendSignInTargets(): SignInTarget[] {
+    const out: SignInTarget[] = [];
+    for (const row of this.backendAvailabilityRows()) {
+      const flow = LOGIN_FLOWS[row.backend];
+      const install = BACKEND_INSTALLATION_INFO[row.backend]?.install;
+      out.push({
+        // Not installed or too old: signing in would not help — the row says how to install (or update) it instead.
+        backend: row.backend, state: row.state, signIn: row.state !== "not_installed" && row.state !== "too_old" && dashboardSignInSupported(row.backend),
+        ...(flow?.remoteLogin === "unsupported" ? { hostCommand: flow.command } : {}),
+        ...(row.state === "not_installed" && install ? { install } : {}),
+        ...(row.state === "too_old" && install ? { update: install } : {}),
+      });
+    }
+    const seen = new Set<string>();
+    for (const name of Object.keys(this.fleetConfig?.instances ?? {}).sort()) {
+      const backend = this.backendNameForInstance(name);
+      const profile = this.credentialProfileOf(name, backend);
+      if (!profile || seen.has(`${backend}\0${profile}`)) continue;
+      seen.add(`${backend}\0${profile}`);
+      let login: ReturnType<typeof credentialProfileLogin>["state"] = "unknown";
+      try { login = credentialProfileLogin(this.dataDir, backend, profile).state; } catch { /* unknown */ }
+      const signIn = dashboardSignInSupported(backend, profile);
+      const hostCommand = signIn ? null : credentialProfileLoginCommand(this.dataDir, backend, profile);
+      out.push({ backend, profile, state: login === "logged-in" ? "usable" : login === "signed-out" ? "not_signed_in" : "unknown", signIn,
+        ...(hostCommand ? { hostCommand } : {}) });
+    }
+    return out;
+  }
+
+  /** #2233: the session with this handle is live, admin, local and of the current dashboard token. */
+  private isLocalAdminSession(handle: string): boolean {
+    const sessions = this.webSessions, token = this.webToken;
+    const record = sessions?.findByHandle(handle);
+    return !!record && !!token && record.tier === "admin" && record.surface === "local" && sessions!.isCurrent(record, tokenEpoch(token));
+  }
+
+  /**
+   * #2233: `/login` for a dashboard requester. The same controller and checks; a CLI that is not installed is refused
+   * with its install command (chat's install-first runs a terminal of its own, which the dashboard does not offer).
+   */
+  private startWebDashboardLogin(backendArg: string, chat: LoginChat, opts: LoginStartOptions): Promise<string | null> {
+    const wanted = LOGIN_BACKEND_ALIASES[backendArg.toLowerCase()] ?? backendArg.toLowerCase();
+    if (isRemovedBackend(wanted)) return Promise.resolve(removedBackendMessage(wanted));
+    const info = BACKEND_INSTALLATION_INFO[wanted];
+    if (info && LOGIN_FLOWS[wanted]?.remoteLogin !== "unsupported" && !this.isCliInstalled(wanted)) {
+      return Promise.resolve(t("login.web_dashboard_not_installed", wanted, info.install));
+    }
+    if (!opts.skipAuthCheck) this.recordLoginFlow(wanted, "login", chat.userId);
+    return this.webLogin.start(backendArg, chat, opts);
+  }
+
   /**
    * Post the backend chooser for a bare `/login`. Caller enforces admin.
    * Returns why the chooser could not be posted, for the caller to tell the
@@ -16423,7 +16536,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     const onError = (err: unknown) => this.logger.debug({ err }, "SSE client write failed; evicting");
     if (event === "message" && data && typeof data === "object") {
       // A chat message: record it, and send it WITH its id so a reconnecting stream can ask for what it missed.
-      const m = data as { instance?: unknown; sender?: unknown; text?: unknown; ts?: unknown; attachments?: unknown; messageId?: unknown; role?: unknown; buttons?: unknown; click?: unknown; links?: unknown; channel?: unknown; from?: unknown };
+      const m = data as { instance?: unknown; sender?: unknown; text?: unknown; ts?: unknown; attachments?: unknown; messageId?: unknown; role?: unknown; buttons?: unknown; click?: unknown; links?: unknown; channel?: unknown; from?: unknown; replyTo?: unknown };
       const recorded = this.webChatHistory.record({
         instance: String(m.instance ?? ""), sender: String(m.sender ?? ""), text: String(m.text ?? ""), ts: String(m.ts ?? new Date().toISOString()),
         attachments: Array.isArray(m.attachments) ? m.attachments as WebChatAttachment[] : undefined,
@@ -16434,6 +16547,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         links: m.links,
         channel: m.channel,
         from: m.from,
+        replyTo: m.replyTo,
       });
       broadcastSseEvent(this.sseClients, event, recorded, onError, this.webChatHistory.cursorOf(recorded));
       // #1629: live-only receipt after the recorded agent reply. Never persist/replay it or give it an SSE cursor.
@@ -16819,16 +16933,16 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
       .sort();
 
     // Pre-manifest Kiro General copied bundled skills directly into
-    // .kiro/skills. If every existing skill is still a bundled name, this is
-    // the unambiguous legacy layout: adopt it once, update it below, and write
-    // the ownership manifest. Any extra skill name keeps the directory fully
+    // .kiro/skills. If every existing skill is still bundled AND belongs to
+    // the closed pre-manifest cohort, adopt it once, update it below, and
+    // write the ownership manifest. Any extra skill name keeps the directory fully
     // on the user-owned/collision path.
     if (!hadManifest && adoptLegacyUnmanaged) {
       const existing = readdirSync(destSkills, { withFileTypes: true })
         .filter(entry => entry.isDirectory() && existsSync(join(destSkills, entry.name, "SKILL.md")))
         .map(entry => entry.name)
         .sort();
-      if (existing.length > 0 && existing.every(name => bundled.includes(name))) {
+      if (existing.length > 0 && existing.every(name => bundled.includes(name) && PRE_MANIFEST_KIRO_SKILLS.has(name))) {
         previouslyManaged = existing;
         this.logger.info(
           { skills: existing, destSkills },

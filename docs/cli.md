@@ -163,6 +163,7 @@ agend doctor                    # Run fleet health diagnostics
 agend doctor mcp                # Fleet-wide MCP health check (IPC, config paths, duplicates, binary PATH)
 agend health                    # Fleet health check — shows problems and diagnostics
 agend validate                  # Validate fleet.yaml and classicBot.yaml
+agend validate --connections    # Print CONNECTIONS=<n>: chat connections in fleet.yaml (for scripts)
 agend backend doctor [backend]  # Check backend environment (binary, auth, tmux, TERM)
 agend delivery scan-forged-envelopes --instance <name>  # Check a kiro instance's transcript for peer envelopes the fleet never delivered (--all, --json)
 ```
@@ -199,6 +200,13 @@ anyone who found the host could close your setup page without ever finding it.
 
 The page closes itself when you finish, after 15 minutes, or after 10 minutes
 idle — a setup form left open is a surface nobody is watching.
+
+**Web only (no bot)** (#2233) is the third choice next to Telegram and Discord: no
+bot token, no admin ID, nothing to verify. It writes the first agent and no chat
+connection, so AgEnD is used from its web dashboard (sign in with
+`agend web --code` on the machine), and backend CLIs are signed in there too
+(Settings → Agents → Sign-ins). Discord or Telegram can be added later from
+Settings. The host confirmation (`agend settings confirm <id>`) is the same.
 
 ### Setting up from a phone
 
@@ -372,7 +380,10 @@ agend uninstall                 # Remove system service
 agend export [path]             # Export config for device migration
 agend export --full [path]      # Export config + all instance data
 agend import <file>             # Import config from export file
+agend shortcuts                 # WSL: create or update the Windows desktop shortcuts
 ```
+
+**Windows desktop shortcuts from WSL (#1853).** `agend shortcuts` makes (or refreshes) **AgEnD 儀表板** and **AgEnD 重新啟動** on the Windows desktop, for an install that predates them or that is only ever updated with `agend update`. It runs the Windows installer's own shortcut code in Windows PowerShell through WSL interop, for this Linux (`WSL_DISTRO_NAME`) and the user running it, and records them in `%LOCALAPPDATA%\AgEnD\install.json`, the same file the installer writes. Each shortcut's first line says which Linux and user it opens ("AgEnD（Linux：AgEnD，使用者：root）"). If install.json already names another Linux or user (for example the separate `AgEnD` Linux and your own Ubuntu), it says so and asks before switching; without a terminal to ask in, it changes nothing. Outside WSL it changes nothing. When interop is off (no `WSLInterop` binfmt entry, or no `powershell.exe`), it says so and points to the other way: paste the Windows one-liner again, which on a PC that already has AgEnD only offers the shortcuts. After `agend update` in a WSL terminal without the shortcuts, one line suggests `agend shortcuts`, once (not in a chat `/update`, which has no terminal). An update never creates desktop items itself.
 
 `agend quickstart` detects a Discord admin from a new message in the selected server or a DM to the bot, then asks you to confirm the displayed username and ID. Follow the send-message prompt after it connects. After at most 30 seconds, or if you decline, it requires a manual user ID (17–20 digits, no leading zero) and re-asks invalid input. Settings → Setup wizard and New connection also require a valid admin ID; Discord detection in the web form is not included yet. Telegram keeps its message detection, with a required positive user ID for manual web setup. Existing access lists are not migrated.
 
@@ -421,6 +432,32 @@ An update rewrites the user unit with the line. `agend restart` adds it to an ol
     There a job can only be loaded into `user/<uid>`, with `LimitLoadToSessionType=Background`. `agend install` does
     not write that; such a job is yours to manage.
 
+**How an update installs (#2264).** `agend update` and the install one-liner both run the target release's own
+installer: `npm exec --yes --package @songsid/agend@<version> -- agend-install`. Re-running the one-liner is how to
+repair any interrupted update. The installer:
+- first takes its install lock, before it touches anything. If another installer is running, it stops and changes
+  nothing (including that update's chat message); the one-liner then says that the install lock could not be taken
+  (the installer prints why: to let a running install finish, or what to do about something left behind), and exits 75
+  rather than reporting a failed install (#2284). A lock left by an installer that has exited is moved aside, and so is
+  one that cannot be read once no process has it open (an older updater still writing it keeps it). Older AgEnD updaters see the installer's lock and
+  wait for it. It keeps the lock until it is done;
+- puts back npm's moved-aside copy of AgEnD (`@songsid/.agend-…`) when it is the only whole copy, so `agend` runs again.
+  It does this only when no npm is installing, removing or updating packages on the host; otherwise it leaves npm's
+  leftovers alone and says so. Nothing is deleted: what it moves aside goes to `<npm prefix>/.agend-quarantine/`;
+- installs the release and checks that `agend --version` reports it. If npm fails but the previous version still runs,
+  nothing else is done and the answer says so. If no working `agend` is left, the previous version is reinstalled;
+- refreshes the service with the new release's `agend install --no-activate`, under the service manager it already
+  has (a system-wide `/etc/systemd/system/agend.service` stays one). Then it restarts the fleet if it is running, or
+  starts it if the service is installed but stopped. A fleet started by hand gets no service, and only an update
+  restarts it. On Linux, `agend install`, `start` and `restart` turn on systemd linger for the user and find the user
+  manager from any shell (root on WSL included). `status` and `stop` only fill in `XDG_RUNTIME_DIR` and the bus
+  address; they change no host setting.
+
+`agend update` runs a release's installer only when that release has one. For an older release (for example
+`agend update --version` back to a release from before this change), and when the npm prefix needs sudo, it keeps the
+older update path described below. There, a system-wide copy is retired after a move to nvm only if that copy is a 2.1
+release.
+
 **Update activation outcomes (#1490).** A verified package is not a running fleet. A confirmed restart succeeds;
 an unfinished restart returns exit 75 (pending), keeps the update marker and all repair copies, and does not restore
 or remove packages. A failed restart returns exit 1. For systemd, the updater can restore its package and unit preimages
@@ -438,7 +475,10 @@ is inside a service cgroup, it starts the updater in an independent user scope
 before the existing two-second delay. `detached` alone does not survive a
 systemd service stop. The scope inherits the fleet's environment and working
 directory; credentials are not put in command arguments. This requires a
-reachable same-user systemd manager and `systemd-run` 240 or newer. An unknown
+reachable same-user systemd manager and `systemd-run` 240 or newer. A fleet under
+the system manager (the legacy `/etc/systemd/system/agend.service`, run as root)
+gets a scope from the system manager instead, which only root can ask for; a
+system service's fleet that is not root refuses the chat update (#2274). An unknown
 cgroup, unsupported helper or launch failure refuses the chat update and asks
 you to run `agend update` from a host shell; it never falls back into the fleet's
 cgroup. Detached Linux fleets outside service cgroups and macOS keep the
@@ -463,3 +503,23 @@ agend settings reject <id>
 ```
 
 Run on the host as the same user as the fleet or SetupHost. This never starts a fleet; a private local socket owns confirmation. Agent sessions (`AGEND_INSTANCE_NAME` present) cannot use it. The id, socket owner generation and inspected effect/summary are checked again before applying. A stale/expired request must be submitted again; pending requests are not persisted across restart.
+
+## Redacted bug reports
+
+General/coordinators have the managed `bug-report` skill. It collects a report locally, attaches the redacted Markdown file in chat, and asks you to approve the exact issue title, body and file before generating a GitHub link. You can also use the CLI:
+
+```bash
+agend bug-report --since 30m --out report.json --description-file problem.txt --steps-file steps.txt
+# Inspect report.json and report.json.md. Approval is the SHA256 printed by collection:
+agend bug-report --draft report.json --approve <SHA256>
+```
+
+The second command prints a prefilled GitHub new-issue link; it does not open a browser or submit an issue. You submit with your own GitHub account. Without GitHub, keep/share `report.json.md` yourself. There is no community channel, project webhook, bundled token or automatic upload.
+
+The default window is the last 30 minutes; `--since` accepts positive `m`, `h`, `d` durations up to 7 days. Each `daemon.log`/`fleet.log` read is limited to a 256 KiB tail and 1,500 lines, plus an optional bounded 5-second systemd user-unit journal query. Timestamps in the requested window are selected; untimestamped stderr diagnostics are labelled time-unknown, not claimed to fall within that window. Rotated logs are not collected. The report states omissions/unavailable sources. Environment includes the installed AgEnD version, Node/runtime, OS and WSL/distro. Backend versions use existing unprofiled `cli-env` cache version/date fields and structured log evidence, without launching CLIs; unknown or stale evidence is labelled. No transcripts, credential configuration, environment dump or model catalog is exported.
+
+One shared redactor covers credential formats/fields/headers/cookies and personal identifiers. Chat/topic/user identifiers and free-form log prose are withheld; recognized error codes, crash phrases and sanitized stack locations are retained. This deliberately removes some useful detail. `--keep-identifiers` explicitly retains email, IP/hostname and path username information; it never disables secret or chat-identifier redaction. Inspect the draft: arbitrary unrecognized secrets in a supplied description cannot be guaranteed safe by pattern matching.
+
+Both files are new, mode 0600; existing files/symlinks are not overwritten. The JSON review snapshot binds the exact title, issue body, full Markdown and delivery mode. An edit requires fresh approval. Links are capped at 7,500 encoded characters. Larger reports keep their complete redacted Markdown locally; the approved link body explicitly asks you to add that file manually rather than silently dropping evidence. Review the file you actually attach.
+
+Optional existing host GitHub CLI login: choose `--submit` during collection, review that delivery mode and exact text, then repeat `--submit` with `--draft`/`--approve`. Authentication is checked only after approval. AgEnD never logs in or stores a token. Overflow needs manual attachment and uses link mode. If creation times out or has an uncertain result, check GitHub before trying again.

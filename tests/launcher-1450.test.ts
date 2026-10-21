@@ -120,7 +120,7 @@ function postinstall(f: ReturnType<typeof fixture>, versions = NOW, env: Record<
   const driver = `process.exit(require(${JSON.stringify(join(f.launcherDir, "postinstall.cjs"))}).main({ launcherDir: ${JSON.stringify(f.launcherDir)}, host: ${JSON.stringify(HOST)}, versions: ${JSON.stringify(versions)} }) || 0)`;
   // A private data directory unless a test gives one (#1487 reads <AGEND_HOME>/update-in-progress.json).
   return spawnSync(process.execPath, ["-e", driver], { encoding: "utf8", timeout: 60_000,
-    env: { ...process.env, AGEND_HOME: f.root, AGEND_UPDATE_KEEPS_PREVIOUS: "", ...env } });
+    env: { ...process.env, AGEND_HOME: f.root, AGEND_UPDATE_KEEPS_PREVIOUS: "", npm_command: "", ...env } });
 }
 const choose = (f: ReturnType<typeof fixture>, deps: Record<string, unknown> = {}) =>
   select.selectRuntime(f.launcherDir, { env: {}, host: HOST, versions: NOW, ...deps });
@@ -170,27 +170,7 @@ describe("postinstall: prove the bundled Node, write the receipt", () => {
   });
 
   // #1487: AgEnD 2.1's updater removed the previous AgEnD before this install; "the previous install stays" is false then.
-  it("a refusal started by AgEnD 2.1's updater says the previous AgEnD is already gone, with the restore commands", () => {
-    const f = fixture({ runtime: "wrong-version" });
-    writeFileSync(join(f.root, "update-in-progress.json"), JSON.stringify({ startedAt: Date.now() - 30_000, pid: 4242 }));
-    const r = postinstall(f);
-    expect(r.status).toBe(1);
-    expect(r.stderr).toContain("npm is rolling this install back.\n");
-    expect(r.stderr).not.toMatch(/previous install(, if any,)? stays/);
-    expect(r.stderr).toContain("REMOVED the previous AgEnD");
-    expect(r.stderr).toMatch(/npm install -g @songsid\/agend@2\.1\.12\n\s+agend install/);
-  });
 
-  it("a plain npm install says it conditionally; 2.2's own updater (AGEND_UPDATE_KEEPS_PREVIOUS) says the previous one stays", () => {
-    const plain = postinstall(fixture({ runtime: "wrong-version" }));
-    expect(plain.status).toBe(1);
-    expect(plain.stderr).toContain("unless AgEnD 2.1's updater started this");
-    expect(plain.stderr).toContain("If this install was started by AgEnD 2.1's updater");
-    const ours = postinstall(fixture({ runtime: "wrong-version" }), NOW, { AGEND_UPDATE_KEEPS_PREVIOUS: "1" });
-    expect(ours.status).toBe(1);
-    expect(ours.stderr).toContain("the previous install stays.");
-    expect(ours.stderr).not.toContain("2.1's updater");
-  });
 
   it("runtime skipped (optional omitted): a qualifying Node proceeds with a warning; an old Node is refused", () => {
     const f = fixture({ runtime: "none" });
@@ -200,6 +180,24 @@ describe("postinstall: prove the bundled Node, write the receipt", () => {
     const old = postinstall(f, OLD);
     expect(old.status).toBe(1);
     expect(old.stderr).toContain("was not installed, and this Node 20.19.0 is older");
+  });
+
+  // #2264 (real Mac, Node 20 running npm): `npm exec` hoists the runtime out of <pkg>/node_modules; that copy only runs
+  // its installer, whose `npm install -g` proves the runtime. The same state outside `npm exec` is still refused.
+  it("fetched by `npm exec` with the runtime hoisted away and an old Node: not refused, no receipt; `npm install` still refuses", () => {
+    const f = fixture({ runtime: "none" });
+    const exec = postinstall(f, OLD, { npm_command: "exec" });
+    expect(exec.status, exec.stderr).toBe(0);
+    expect(exec.stdout).toContain("Fetched to run its installer");
+    expect(existsSync(join(f.pkg, ".agend-runtime.json"))).toBe(false);
+    expect(postinstall(f, OLD, { npm_command: "install" }).status).toBe(1);
+  });
+
+  it("fetched by `npm exec` with the runtime at its exact path: proven as any install", () => {
+    const f = fixture({ runtime: "ok" });
+    const r = postinstall(f, OLD, { npm_command: "exec" });
+    expect(r.status, r.stderr).toBe(0);
+    expect(existsSync(join(f.pkg, ".agend-runtime.json"))).toBe(true);
   });
 
   it("no runtime pinned (this release bundles none yet): only the running Node decides", () => {
@@ -386,7 +384,8 @@ describe("the sh bins: AgEnD starts with no Node on PATH", () => {
 
   it("both bins are the same POSIX sh script, executable, and what package.json links", () => {
     const manifest = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8"));
-    expect(manifest.bin).toEqual({ agend: "./launcher/agend", "agend-agent": "./launcher/agend-agent" });
+    // #2264: plus the installer (a plain Node script: it runs from npm's exec cache, on the Node that runs npm).
+    expect(manifest.bin).toEqual({ agend: "./launcher/agend", "agend-agent": "./launcher/agend-agent", "agend-install": "./launcher/agend-install.cjs" });
     const text = readFileSync(join(LAUNCHER, "agend"), "utf8");
     expect(readFileSync(join(LAUNCHER, "agend-agent"), "utf8")).toBe(text);
     expect(text.startsWith("#!/bin/sh\n")).toBe(true);

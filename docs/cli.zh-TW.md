@@ -139,6 +139,7 @@ agend doctor                    # 執行 fleet 健康診斷
 agend doctor mcp                # 全 fleet MCP 健康檢查（IPC、配置路徑、重複、binary PATH）
 agend health                    # Fleet 健康檢查——列出問題與診斷
 agend validate                  # 驗證 fleet.yaml 與 classicBot.yaml
+agend validate --connections    # 印出 CONNECTIONS=<n>：fleet.yaml 的聊天連線數（給腳本用）
 agend backend doctor [backend]  # 檢查後端環境（執行檔、驗證、tmux、TERM）
 agend delivery scan-forged-envelopes --instance <name>  # 檢查 kiro instance 的 transcript 裡是否有 fleet 從未投遞過的 peer envelope（--all、--json）
 ```
@@ -158,6 +159,8 @@ agend setup --tunnel            # ……並公開出去，讓手機也能開
 `agend setup` 在健康 port 上開一個小表單，並印出**兩樣**東西：設定頁網址與設定碼。網址只代表頁面在哪，不是使用許可——隨機路徑只是讓人用猜的猜不到。真正的憑證是打進頁面的設定碼；憑證不進網址，轉發的訊息、shell 歷史、聊天軟體的連結預覽才帶不走完整權限。打錯五次就關頁，錯的碼與重播的 session cookie 共用額度；打錯路徑不算——否則找到主機的人不用找到頁面就能把它關掉。
 
 頁面在完成、15 分鐘到、或閒置 10 分鐘後自己關掉——沒人看著的設定表單就是暴露面。
+
+**Web only (no bot)**（#2233）是 Telegram、Discord 之外的第三個選項：不用 bot token、不用管理員 ID、也沒有要驗證的東西。它只寫入第一個 agent、不建立聊天連線，所以 AgEnD 從網頁儀表板使用（在機器上用 `agend web --code` 取得登入碼），後端 CLI 也在那裡登入（設定 → Agent → 登入）。之後可以在設定加上 Discord 或 Telegram。主機確認（`agend settings confirm <id>`）一樣要做。
 
 `--tunnel` 每次都要你親口確認，沒有旗標或設定可以預先答應；沒有終端的執行直接拒絕，不當作你同意了。手機設定走 Cloudflare 通道，你打進去的 bot token 會經過 Cloudflare 的邊緣——不能接受就回機器上設。
 
@@ -252,7 +255,10 @@ agend uninstall                 # 移除系統服務
 agend export [path]             # 匯出配置以用於遷移
 agend export --full [path]      # 匯出配置＋所有實例資料
 agend import <file>             # 從匯出檔案匯入配置
+agend shortcuts                 # WSL：建立或更新 Windows 桌面捷徑
 ```
+
+**從 WSL 建立 Windows 桌面捷徑（#1853）。** `agend shortcuts` 會在 Windows 桌面建立（或更新）**AgEnD 儀表板**和 **AgEnD 重新啟動**，給安裝時還沒有這兩個捷徑、或平常只用 `agend update` 更新的人使用。它透過 WSL interop，在 Windows PowerShell 裡執行 Windows 安裝程式自己的捷徑程式碼，對象是目前這個 Linux（`WSL_DISTRO_NAME`）和執行它的使用者，並記到 `%LOCALAPPDATA%\AgEnD\install.json`（和安裝程式寫的是同一個檔案）。每個捷徑的第一行會顯示它打開的 Linux 和使用者（「AgEnD（Linux：AgEnD，使用者：root）」）。如果 install.json 已經指向另一個 Linux 或使用者（例如 AgEnD 專用的 Linux 和你原本的 Ubuntu），會先說明並詢問才切換；沒有終端機可以詢問時就不做任何變更。不在 WSL 裡時不做任何變更。interop 關閉時（沒有 `WSLInterop` 的 binfmt 項目，或找不到 `powershell.exe`），它會直接說明，並指出另一個方法：再貼一次 Windows 一行安裝指令，已經裝好 AgEnD 的電腦上它只會問要不要更新捷徑。在還沒有捷徑的 WSL 終端機裡執行 `agend update` 之後，會出現一行提示建議執行 `agend shortcuts`，只出現一次（聊天裡的 `/update` 沒有終端機，所以不會出現）。更新本身絕不會在桌面上建立任何東西。
 
 `agend quickstart` 會從所選伺服器的新訊息或 bot 私訊偵測 Discord 管理員，再請你確認顯示的使用者名稱與 ID。連線後看到提示再發訊息。最多等待 30 秒；如果未偵測到或你不確認，就必須手動輸入使用者 ID（17–20 位數字，開頭不能是 0），格式錯誤會重新詢問。設定 → 設定精靈與新增連線也必須填入有效管理員 ID；網頁表單這次尚未加入 Discord 自動偵測。Telegram 保留訊息偵測，手動網頁設定時也必須填入正整數使用者 ID。既有存取名單不會遷移。
 
@@ -283,6 +289,15 @@ Detached restart 使用非同步 polling 與 monotonic deadline。期限到了�
   - 下一次 `agend restart` 會執行這次啟用，只做一次：一次 `bootout`、一次 `bootstrap`。接著 `launchctl print` 必須顯示新的 job 正在執行；若沒有，會重新 bootstrap 先前的 plist 並確認。
   - 只能用 SSH 連線、沒有人登入的 Mac 沒有 `gui/<uid>` domain（`launchctl` 回報錯誤 125）。在那裡 job 只能以 `LimitLoadToSessionType=Background` 載入 `user/<uid>`；`agend install` 不會這樣寫，這種 job 需要你自行管理。
 
+**更新怎麼安裝（#2264）。** `agend update` 和安裝的一行指令都執行目標版本自己的安裝程式：
+`npm exec --yes --package @songsid/agend@<版本> -- agend-install`。任何中斷的更新，再執行一次一行指令就能修好。安裝程式會：
+- 在動任何東西之前先取得安裝鎖。另一個安裝程式正在執行時，它會停下、不做任何改動（也不碰那次更新的聊天訊息）；一行指令會說明無法取得安裝鎖（安裝程式會印出原因：讓正在進行的安裝完成，或該如何處理留下的東西），並以代碼 75 結束，而不是回報安裝失敗（#2284）。已結束的安裝程式留下的鎖會被移到一旁；讀不懂的鎖在沒有任何程序開著它時也會被移到一旁（較舊的更新程式還在寫它時則保留）。較舊版本的 AgEnD 更新程式看得到安裝程式的鎖，會等它完成。它會一直持有這個鎖直到完成；
+- 把 npm 移到旁邊的那份 AgEnD（`@songsid/.agend-…`）在它是唯一完整的一份時放回去，讓 `agend` 恢復可用。只有在主機上沒有 npm 正在安裝、移除或更新套件時才會這麼做；否則不碰 npm 留下的東西，並說明原因。不會刪除任何東西：移到一旁的都放在 `<npm prefix>/.agend-quarantine/`；
+- 安裝該版本，並確認 `agend --version` 回報的是它。npm 失敗但前一版仍能執行時，不再做其他事，並如實說明。沒有任何能執行的 `agend` 時，才重新裝回前一版；
+- 用新版本的 `agend install --no-activate` 更新服務設定，沿用原本的服務管理方式（系統層的 `/etc/systemd/system/agend.service` 仍是系統層）。接著艦隊正在執行就重新啟動；服務已安裝但停著，就啟動它。手動啟動的艦隊不會被建立服務，只有更新時才會重新啟動它。在 Linux 上，`agend install`、`start`、`restart` 會為使用者開啟 systemd linger，並從任何 shell（包括 WSL 上的 root）找到使用者的 systemd。`status` 和 `stop` 只補上 `XDG_RUNTIME_DIR` 與 bus 位址，不改動主機設定。
+
+`agend update` 只有在目標版本自帶安裝程式時才執行它。目標是較舊的版本（例如用 `agend update --version` 回到這次改動之前的版本），或 npm prefix 需要 sudo 時，沿用下面說明的舊更新流程。在那條流程裡，搬到 nvm 之後只有 2.1 版的系統層副本會被退役。
+
 **更新的啟用結果（#1490）。** 套件驗證通過不代表 fleet 正在執行。確認重啟完成才算成功；未完成的重啟回傳 exit 75（pending），保留更新標記與所有修復備份，不還原或移除套件。重啟失敗回傳 exit 1。Systemd 路徑只有在載入的目標相同、unit bytes 未變、沒有待執行 job、main/control PID 都為零，且確認停止之後，才可還原本次更新的套件與 unit 備份。重新載入並核對舊定義後，才啟動原本正在執行的服務；原本停止的服務維持停止。即使回復成功，仍回報本次更新失敗。Ownership 變更或讀不到、沒有備份、detached owner、自訂而無法追蹤停止的模式或回復未完成，都需要管理者檢查，不能回報回復成功。重試前請以 `systemctl [--user] status <unit>` 檢查選定的服務。這些核對不能讓外部的服務／套件修改變成原子操作；更新期間請勿同時執行其他安裝或服務管理操作。
 回復會恢復舊執行檔的政策，不會還原資料目錄。備份來自較舊版本時，請先看[降版相容性限制](downgrade-compatibility.zh-TW.md)。
 
@@ -290,6 +305,8 @@ Detached restart 使用非同步 polling 與 monotonic deadline。期限到了�
 會先把 updater 移到獨立的 user scope，再等待原有的兩秒延遲。單靠 `detached`
 無法讓程序活過 systemd 服務停止。Scope 繼承 fleet 的環境與工作目錄；憑證不會放進
 命令參數。這需要可連線的同使用者 systemd manager，以及 240 以上的 `systemd-run`。
+由系統 manager 執行的 fleet（舊的 `/etc/systemd/system/agend.service`，以 root 執行）
+改用系統 manager 的 scope，只有 root 能申請；不是 root 的系統服務 fleet 會拒絕聊天更新（#2274）。
 Cgroup 不明、helper 不支援或啟動失敗時，聊天更新會拒絕並提示從主機 shell 執行
 `agend update`，不會退回 fleet 的 cgroup。Linux 上不在服務 cgroup 內的 detached
 fleet 與 macOS 維持原有啟動路徑。Scope 隔離的是 fleet 停止，無法抵抗主機關機，
@@ -313,3 +330,23 @@ agend settings reject <id>
 ```
 
 在 host 上以 fleet 或 SetupHost 的相同使用者執行。它不會啟動 fleet；確認由私有本機 socket 負責。Agent session（存在 `AGEND_INSTANCE_NAME`）不能使用。套用前會再次核對 id、socket owner generation，以及檢查過的 effect／summary。過期或 stale 請求需重新提出；pending 不會跨重啟保存。
+
+## 遮蔽敏感資料的問題回報
+
+General／協調者的受管理 `bug-report` 技能會先在本機整理回報，於聊天附上遮蔽後的 Markdown 檔，再請你核准確切的標題、內文與檔案，才產生 GitHub 預填連結。也可以直接使用：
+
+```bash
+agend bug-report --since 30m --out report.json --description-file problem.txt --steps-file steps.txt
+# 檢查 report.json 與 report.json.md，使用收集時印出的 SHA256 核准：
+agend bug-report --draft report.json --approve <SHA256>
+```
+
+第二個命令只印出 GitHub 新問題的預填連結，不會開啟瀏覽器或提交。請用自己的 GitHub 帳號提交；沒有帳號也能自行保存、分享 `report.json.md`。本功能不含社群頻道、專案 webhook、內建憑證或自動上傳。
+
+預設收集最近 30 分鐘；`--since` 可用正整數 `m`、`h`、`d`，上限 7 天。`daemon.log` 與 `fleet.log` 各只讀取尾端最多 256 KiB、1,500 行，另嘗試最多 5 秒的 systemd 使用者服務日誌查詢。只選擇時間範圍內的記錄；沒有時間戳記的錯誤會標示時間未知，不宣稱發生於該區間。不讀取輪替舊檔，缺漏或無法讀取的來源會註明。環境包含已安裝的 AgEnD、Node／執行環境、作業系統與 WSL／發行版。後端 CLI 版本只讀取既有 `cli-env` 快取的版本、日期及結構化日誌，不啟動 CLI；資料未知、可能過期皆會標示。不匯出對話逐字稿、憑證設定、環境變數全集或模型目錄。
+
+共用遮蔽模組會移除憑證格式、敏感欄位、授權標頭、Cookie 與個人識別資訊。聊天內容、主題／使用者識別碼及任意日誌文字不會匯出；保留已知錯誤代碼、崩潰訊息與遮蔽後的堆疊位置，因此會損失部分細節。只有明確選用 `--keep-identifiers` 才保留郵件、IP／主機名稱、路徑中的使用者名稱；憑證與聊天識別碼仍會遮蔽。請親自檢查：自行填寫的描述若含未知格式的秘密，規則比對無法保證辨識。
+
+兩個新檔的權限皆為 0600，不覆寫既有檔案或符號連結。JSON 審閱快照綁定確切標題、內文、完整 Markdown 與提交方式；修改後須重新核准。預填網址上限為編碼後 7,500 字元；超出時完整回報仍保存在本機，核准的預填內文會請你手動附檔，不會暗中刪除證據。請核對實際附上的檔案。
+
+若你要求使用主機既有的 GitHub CLI 登入，可在收集時加 `--submit`，審閱該提交方式及文字，核准時也加 `--submit`。只有核准後才檢查登入，不會代為登入或儲存 token。超出連結容量的回報須改用連結方式手動附檔。提交逾時或結果不明時，先查 GitHub 再決定是否重試。

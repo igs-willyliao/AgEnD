@@ -74,13 +74,26 @@ export interface UsageMetric {
    */
   expiresAt?: string | null;
   windowMs?: number | null;
+  /**
+   * On a row showing its last known numbers (`stale`): this metric's window has reset since they were read, so its
+   * number (`used`, `value`) is dropped — it was for a window that has ended. Shown as "reset since <resetsAt>".
+   */
+  resetPassed?: true;
 }
+
+/** Why a row shows its last known numbers instead of a live read. */
+export type UsageStaleCause = "expired" | "transient" | "error";
 
 export interface ProviderUsage {
   id: string;
   name: string;
   /** #2014: the credential profile this row reads (its `name` ends in ` (<profile>)`); the page shows it on its own line. */
   profile?: string;
+  /**
+   * The default (shared) login's row beside profiles: its `name` ends in ` (default)`. The page shows "default", in the
+   * page's language, on its own line, as a profile row shows its profile; the chat text says it in the fleet's.
+   */
+  defaultLogin?: true;
   status: "ok" | "error" | "no-credentials";
   /** A non-metered subscription whose entitlement is unlimited (not 0/100%). */
   unlimited?: boolean;
@@ -89,8 +102,16 @@ export interface ProviderUsage {
   errorI18n?: UsageI18nRef;
   hint?: string;
   hintI18n?: UsageI18nRef;
-  /** True when the row shows last-good data because the live query was rate-limited. */
+  /** True when the row shows last-good data because the live query failed (rate limit, jitter, expiry, any error). */
   stale?: boolean;
+  /** On a `stale` row: when its numbers were read (ISO). */
+  cachedAt?: string;
+  /**
+   * On a `stale` row: why. "expired": the login's token expired or was refused (`hint` says how to refresh);
+   * "transient": a rate limit, a network or vendor blip, a token being refreshed; "error": any other failed read
+   * (`hint` is that error).
+   */
+  staleCause?: UsageStaleCause;
   /** True when a rate-limit error has no stale data — a transient, non-alarming failure. */
   transient?: boolean;
   metrics: UsageMetric[];
@@ -600,14 +621,30 @@ export async function fetchClaudeUsage(storeHome?: string, scope: ClaudeUsageSco
 
 const AGY_TOKEN_FILE = ["antigravity-cli", "antigravity-oauth-token"];
 /**
- * The production base first: checked live 2026-10-20 (a user's account, read-only), the daily base's quota summary had
- * only the "Claude and GPT models" group while the production base's had "Gemini Models" too — the Gemini line then
- * fell back to the busiest single model. The daily base stays as the fallback.
+ * The daily base first, the production base as the fallback. Checked live 2026-10-20 (#2240, a user's Google AI Pro
+ * account, read-only) against agy's own /quota: only the daily base, asked as agy's CLI asks (agyUserAgent), answers with
+ * the plan's Gemini quota and the Gemini 4 Argon group — agy's numbers exactly. The production base answers with a
+ * free-tier Gemini bucket and no Argon whatever the client says.
  */
 const AGY_CLOUDCODE_URLS = [
-  "https://cloudcode-pa.googleapis.com",
   "https://daily-cloudcode-pa.googleapis.com",
+  "https://cloudcode-pa.googleapis.com",
 ];
+/**
+ * The agy CLI version AgEnD names itself as, in agy's own User-Agent (`antigravity/cli/<version> (aidev_client; …)`, as
+ * captured from agy 1.4.3's /quota, #2240, 2026-10-20). The daily base gates its summary on it: as `antigravity/cli/1.2.0`
+ * there was no Argon group, from 1.3.0 on there was; as `antigravity/cli/1.0.0` no Gemini group either; without the
+ * `cli/` segment (`antigravity/2.24.0`, OpenUsage's value) Gemini but never Argon. If Google raises the gate past it, a
+ * group disappears again and the row falls back to the busiest model's quota — a visible gap, never wrong numbers.
+ * Bump it here.
+ */
+export const AGY_CLIENT_VERSION = "1.4.3";
+/** agy's own User-Agent shape (`antigravity/cli/%s (aidev_client; os_type=…; arch=…)`), for this host. */
+export function agyUserAgent(platform: string = process.platform, arch: string = process.arch): string {
+  const os = platform === "win32" ? "windows" : platform;
+  const cpu = arch === "x64" ? "amd64" : arch;
+  return `antigravity/cli/${AGY_CLIENT_VERSION} (aidev_client; os_type=${os}; arch=${cpu})`;
+}
 /**
  * The Google installed-app OAuth client pair, READ FROM THE INSTALLED agy
  * BINARY rather than committed here.
@@ -902,17 +939,47 @@ async function agyAccessToken(): Promise<{ token: string } | { error: string; er
  */
 const AGY_MODELS_DEADLINE_MARGIN_MS = 1_000;
 
-function agyModels(base: string, token: string): { within(budgetMs: number): Promise<AgyModels | null>; cancel(): void } {
+function agyModels(base: string, token: string): AgyOptionalRead<AgyModels> {
+  return agyOptionalRead<AgyModels>(base, token, "fetchAvailableModels", "{}");
+}
+
+/**
+ * The plan's name for the row (Google AI Pro …): `loadCodeAssist`, asked as agy asks it (its client metadata), read
+ * like the models' quotas — alongside the summary, optional, cancelled at the deadline. The paid tier wins over the
+ * current one, as OpenUsage reads it: a Pro account's current tier is "free-tier" (named "Antigravity").
+ */
+const AGY_LOAD_CODE_ASSIST_BODY = JSON.stringify({ metadata: { ideType: "ANTIGRAVITY", platform: "PLATFORM_UNSPECIFIED", pluginType: "GEMINI" } });
+interface AgyCodeAssist { paidTier?: { id?: unknown; name?: unknown }; currentTier?: { id?: unknown; name?: unknown } }
+function agyCodeAssist(base: string, token: string): AgyOptionalRead<AgyCodeAssist> {
+  return agyOptionalRead<AgyCodeAssist>(base, token, "loadCodeAssist", AGY_LOAD_CODE_ASSIST_BODY);
+}
+/** The plan's name from loadCodeAssist: the paid tier's, else the current tier's (its name, else its id), else null; at most
+ *  AGY_PLAN_MAX characters (it is a badge on one line, and the text comes from the server). */
+export function agyPlan(body: AgyCodeAssist | null): string | null {
+  for (const tier of [body?.paidTier, body?.currentTier]) {
+    for (const v of [tier?.name, tier?.id]) if (typeof v === "string" && v.trim()) return truncatePlan(v.trim());
+  }
+  return null;
+}
+const AGY_PLAN_MAX = 64;
+function truncatePlan(name: string): string {
+  const chars = [...name];
+  return chars.length <= AGY_PLAN_MAX ? name : `${chars.slice(0, AGY_PLAN_MAX - 1).join("")}…`;
+}
+
+type AgyOptionalRead<T> = { within(budgetMs: number): Promise<T | null>; cancel(): void };
+/** One optional Cloud Code read beside the summary: its body, or null on any failure; bounded by the caller's budget. */
+function agyOptionalRead<T extends object>(base: string, token: string, method: string, requestBody: string): AgyOptionalRead<T> {
   const abort = new AbortController();
   const result = (async () => {
-    const res = await fetch(`${base}/v1internal:fetchAvailableModels`, {
+    const res = await fetch(`${base}/v1internal:${method}`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "User-Agent": "antigravity" },
-      body: "{}",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "User-Agent": agyUserAgent() },
+      body: requestBody,
       signal: AbortSignal.any([abort.signal, AbortSignal.timeout(LONGEST_SINGLE_FETCH_MS)]),
     });
     if (!res.ok) return null;
-    const body = await res.json() as AgyModels | null;
+    const body = await res.json() as T | null;
     return body && typeof body === "object" ? body : null;
   })().catch(() => null);
   return {
@@ -960,6 +1027,7 @@ export async function fetchAntigravityUsage(): Promise<Omit<ProviderUsage, "id" 
     // Alongside the summary, not after it: one more round trip in the chain would push a slow-but-healthy pair past
     // the provider deadline. Cancelled when the summary fails (it never rejects).
     const models = agyModels(base, auth.token);
+    const codeAssist = agyCodeAssist(base, auth.token);
     try {
       let res: Response;
       try {
@@ -968,7 +1036,7 @@ export async function fetchAntigravityUsage(): Promise<Omit<ProviderUsage, "id" 
           headers: {
             Authorization: `Bearer ${auth.token}`,
             "Content-Type": "application/json",
-            "User-Agent": "antigravity",
+            "User-Agent": agyUserAgent(),
           },
           body: "{}",
           signal: AbortSignal.timeout(LONGEST_SINGLE_FETCH_MS),
@@ -981,12 +1049,15 @@ export async function fetchAntigravityUsage(): Promise<Omit<ProviderUsage, "id" 
       let body: AgyQuotaSummary;
       try { body = await res.json() as typeof body; } catch { continue; }
       const budgetMs = providerDeadlineMs - (performance.now() - startedAt) - AGY_MODELS_DEADLINE_MARGIN_MS;
-      const metrics = agyPoolMetrics(agyUsageBuckets(body ?? {}, await models.within(budgetMs)));
+      const [modelList, assist] = await Promise.all([models.within(budgetMs), codeAssist.within(budgetMs)]);
+      const metrics = agyPoolMetrics(agyUsageBuckets(body ?? {}, modelList));
+      const plan = agyPlan(assist);
       return metrics.length
-        ? { status: "ok", plan: null, metrics }
-        : { status: "ok", plan: null, hint: "No quota information reported for this account.", hintI18n: i18n("usage.hint.no_quota"), metrics: [] };
+        ? { status: "ok", plan, metrics }
+        : { status: "ok", plan, hint: "No quota information reported for this account.", hintI18n: i18n("usage.hint.no_quota"), metrics: [] };
     } finally {
       models.cancel();                                  // a base given up on, or a read already settled: nothing left to wait for
+      codeAssist.cancel();
     }
   }
   return { status: "error", error: "Could not reach the Cloud Code quota endpoints.", errorI18n: i18n("usage.error.unreachable", "Cloud Code quota endpoints"), metrics: [] };
@@ -1595,7 +1666,7 @@ export async function fetchKiroUsage(storeHome?: string): Promise<Omit<ProviderU
 
 // ── Registry ─────────────────────────────────────────────────────────────────
 
-type UsageProvider = { id: string; name: string; profile?: string; fetch: (storeHome?: string, scope?: ClaudeUsageScope) => Promise<Omit<ProviderUsage, "id" | "name">> };
+type UsageProvider = { id: string; name: string; profile?: string; defaultLogin?: true; fetch: (storeHome?: string, scope?: ClaudeUsageScope) => Promise<Omit<ProviderUsage, "id" | "name">> };
 
 type UsageFleetConfig = Parameters<typeof listConfiguredProfiles>[0];
 
@@ -1701,6 +1772,7 @@ export function providersForConfig(
       rows.push({
         id: provider.id,
         name: provider.id === "codex" ? `${provider.name} (default)` : provider.name,
+        ...(provider.id === "codex" ? { defaultLogin: true as const } : {}),
         // Claude's shared row keeps its statusline fallback to the shared instances (#1699); others ignore the scope.
         fetch: () => provider.fetch(undefined, { besideProfiles: true }),
       });
@@ -1728,7 +1800,7 @@ function claudeHostRows(config: UsageFleetConfig, provider: UsageProvider, backe
   if (profiles.length === 0) return [provider];
   const homes = profiles.map(profile => credentialProfileStoreHome(getAgendHome(), backendName, profile));
   return [
-    { id: provider.id, name: `${provider.name} (default)`, fetch: () => provider.fetch(undefined, { besideProfiles: true }) },
+    { id: provider.id, name: `${provider.name} (default)`, defaultLogin: true, fetch: () => provider.fetch(undefined, { besideProfiles: true }) },
     ...profiles.map((profile, i) => ({
       id: `${provider.id}:${profile}`,
       name: `${provider.name} (${profile})`,
@@ -1736,6 +1808,11 @@ function claudeHostRows(config: UsageFleetConfig, provider: UsageProvider, backe
       fetch: () => provider.fetch(homes[i], inUse.includes(profile) ? { profile } : { profile, hostOnly: true }),
     })),
   ];
+}
+
+/** What a row says about whose login it reads: its profile (#2014), or that it is the default login beside profiles. */
+function rowTags(p: UsageProvider): Pick<ProviderUsage, "profile" | "defaultLogin"> {
+  return { ...(p.profile ? { profile: p.profile } : {}), ...(p.defaultLogin ? { defaultLogin: true as const } : {}) };
 }
 
 /** #2236: the Claude credential profiles on this host (their directories), whether or not an instance uses them. */
@@ -1944,15 +2021,15 @@ export async function fetchAllUsage(
         // Fail soft: this row says it could not be read, the rest still answer,
         // and the snapshot returns in bounded time.
         return {
-          id: p.id, name: p.name, ...(p.profile ? { profile: p.profile } : {}), status: "error",
+          id: p.id, name: p.name, ...rowTags(p), status: "error",
           error: `Could not reach ${p.name}.`,
           errorI18n: i18n("usage.error.unreachable", p.name),
           metrics: [],
         };
       }
-      return { id: p.id, name: p.name, ...(p.profile ? { profile: p.profile } : {}), ...outcome };
+      return { id: p.id, name: p.name, ...rowTags(p), ...outcome };
     } catch (err) {
-      return { id: p.id, name: p.name, ...(p.profile ? { profile: p.profile } : {}), status: "error", error: String((err as Error)?.message ?? err), metrics: [] };
+      return { id: p.id, name: p.name, ...rowTags(p), status: "error", error: String((err as Error)?.message ?? err), metrics: [] };
     }
   }));
   return {

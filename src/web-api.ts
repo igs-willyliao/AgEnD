@@ -49,7 +49,7 @@ import { readStatuslineModel, resolveInstanceContext } from "./topic-commands.js
 import { z } from "zod";
 import { evaluateWebRequest, isPassiveWebRead, isSecureRequest, isWebRequestAuthorized, WEB_TOKEN_INVALID_MESSAGE, type WebGateRequest } from "./web-auth.js";
 import { dashboardOriginFor, type PreviewAvailability } from "./web-preview.js";
-import { newWebMessageId, parseLastEventId, type WebChatHistory } from "./web-chat-history.js";
+import { newWebMessageId, parseLastEventId, webChatReplyRef, webChatReplyText, type WebChatHistory, type WebChatMessage } from "./web-chat-history.js";
 import { attachmentDelivery, createPartFile, displayName, fileTooLargeText, INLINE_MIME, isFileId, MEDIA_RANGE_MAX, publicAttachment, removeQuietly, UPLOAD_LIMITS, UPLOAD_MAX_MS, UPLOAD_STALL_MS, UploadSniffer, uploadLimits, wellFormed, type ServedFile, type UploadEntry, type WebFileLedger } from "./web-upload.js";
 import { getAgendHome } from "./paths.js";
 import type { WebSessionStore, SessionRecord } from "./web-session.js";
@@ -177,6 +177,8 @@ const SendMessageSchema = z.object({
   message: z.string().max(MAX_TEXT),
   /** Ids from POST /ui/upload, for this instance, not yet sent. */
   attachments: z.array(z.string().regex(/^[0-9a-f]{32}$/)).max(UPLOAD_LIMITS.maxFiles).optional(),
+  /** #2272: the message of this chat this one replies to — its row only; the server reads what it quotes. */
+  replyTo: z.object({ boot: z.string().regex(/^[0-9a-f]{1,32}$/), id: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER) }).strict().optional(),
 }).strict().refine(v => v.message.trim().length > 0 || (v.attachments?.length ?? 0) > 0, { message: "a message or at least one file", path: ["message"] });
 
 /** An instance name that is safe as one path segment (no separator, no NUL, not a dot name). */
@@ -271,6 +273,10 @@ export interface WebApiContext {
   modelCatalogFor?(backend: string, instance: string | null): Array<{ id: string; label: string; description?: string }>;
   /** Absent in a hand-built context: cookies are then simply not a credential, the header token still is. */
   readonly webSessions?: WebSessionStore | null;
+  /** #2233: dashboard-started backend sign-ins (FleetManager); absent in a hand-built context. */
+  readonly webBackendLogins?: import("./web-backend-login.js").WebBackendLogins;
+  /** #2233: Settings → Agents' sign-in list (FleetManager.backendSignInTargets). */
+  backendSignInTargets?(): import("./web-backend-login.js").SignInTarget[];
   readonly dataDir: string;
   readonly sseClients: Set<ServerResponse>;
   readonly fleetConfig: {
@@ -635,6 +641,52 @@ function handleEffectTrials(req: IncomingMessage, res: ServerResponse, url: URL,
       answer(service.trialStop(route![1]!, now.actor));
     }
   })().catch(() => { try { json(res, 500, { error: "trial_request_failed" }); } catch { /* response ended */ } });
+  return true;
+}
+
+/**
+ * #2233: signing a backend in from the dashboard (web-backend-login.ts). A signed-in admin session on the local surface
+ * only — never the CLI's header token (an agent's), a guest, a read session or the public link (refused before the body
+ * is read, and again after it). Every answer is no-store: the starter's view carries the terminal's access code.
+ */
+function handleBackendLogin(req: IncomingMessage, res: ServerResponse, url: URL, ctx: WebApiContext, path: string, method: string): boolean {
+  res.setHeader("Cache-Control", "private, no-store");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  const reading = method === "GET";
+  if (gatewayRequestContext(req)) { json(res, reading ? 404 : 403, { error: "sign_in_not_over_public_link" }); return true; }
+  const who = (): { handle: string; label: string } | { error: string; status: number } => {
+    const v = evaluateWebRequest(req as unknown as WebGateRequest, url, ctx.webToken ?? null, ctx.webSessions, { touch: false });
+    if (v.kind !== "allow") return { error: WEB_TOKEN_INVALID_MESSAGE, status: 401 };
+    if (v.via !== "session" || v.session.tier !== "admin" || v.session.surface !== "local") return { error: "sign_in_needs_a_local_admin", status: 403 };
+    return { handle: v.session.handle, label: v.session.label };
+  };
+  const first = who(); if ("error" in first) { json(res, first.status, { error: first.error }); return true; }
+  const logins = ctx.webBackendLogins;
+  if (!logins) { json(res, 404, { error: "sign_in_unavailable" }); return true; }
+  const action = /^\/ui\/backend-login\/(check|start|cancel)$/.exec(path)?.[1];
+  if (reading && path === "/ui/backend-login" && [...url.searchParams.keys()].length === 0) { json(res, 200, { login: logins.view(first.handle), targets: ctx.backendSignInTargets?.() ?? [] }); return true; }
+  if (method !== "POST" || !action) { json(res, 404, { error: "not_found" }); return true; }
+  (async () => {
+    let bytes: Buffer;
+    try { bytes = await readBoundedWebBody(req, 4 * 1024); } catch { json(res, 413, { error: "sign_in_body_bound" }); return; }
+    if (!permitWebContinuation(req, res, ctx)) return;
+    const now = who(); if ("error" in now) { json(res, now.status, { error: now.error }); return; }
+    if (now.handle !== first.handle) { json(res, 409, { error: "sign_in_session_changed" }); return; }
+    let body: unknown; try { body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { json(res, 400, { error: "sign_in_json" }); return; }
+    if (action === "check") {
+      const parsed = z.strictObject({ backend: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/i), profile: z.string().min(1).max(64).optional() }).safeParse(body);
+      if (!parsed.success) { json(res, 400, { error: "sign_in_args" }); return; }
+      json(res, 200, await logins.check(now, parsed.data.backend, parsed.data.profile));
+    } else if (action === "start") {
+      const parsed = z.strictObject({ confirm: z.string().regex(/^[0-9a-f]{32}$/), tunnel: z.boolean().optional() }).safeParse(body);
+      if (!parsed.success) { json(res, 400, { error: "sign_in_args" }); return; }
+      const result = await logins.begin(now, parsed.data.confirm, parsed.data.tunnel === true);
+      json(res, "error" in result ? 409 : 200, result);
+    } else {
+      if (!z.strictObject({}).safeParse(body).success) { json(res, 400, { error: "sign_in_args" }); return; }
+      json(res, 200, { message: await logins.cancel() });
+    }
+  })().catch(() => { try { json(res, 500, { error: "sign_in_request_failed" }); } catch { /* response ended */ } });
   return true;
 }
 
@@ -1657,6 +1709,8 @@ export function handleWebRequest(
 
   // Canvas effects are absent from the public gateway manifest and independently refused above.
   if (path === "/ui/effect-trials" || path.startsWith("/ui/effect-trials/")) return handleEffectTrials(req, res, url, ctx, path, method);
+  // #2233: backend sign-in — absent from the public manifest and the guest table, and refused here too.
+  if (path === "/ui/backend-login" || path.startsWith("/ui/backend-login/")) return handleBackendLogin(req, res, url, ctx, path, method);
   if (path === "/ui/effects" || path.startsWith("/ui/effects/")) return handleEffects(req, res, url, ctx, path, method);
 
   // #1386: Acknowledge a "Needs you" delivery item — a session write (CSRF, checked by the gate) or the CLI's header
@@ -2392,6 +2446,17 @@ export function handleWebRequest(
   return true;
 }
 
+/**
+ * #2272: the line a web reply's channel copy opens with — the quoted sender and first words when that message reached
+ * the channel (its members saw it); a web-only one is only named, never copied out to the channel.
+ */
+export function webReplyEchoLine(quoted: WebChatMessage): string {
+  if (!quoted.channel) return t("web.echo_reply_web_only");
+  const ref = webChatReplyRef(quoted);
+  const words = ref.text.slice(0, 120) || (ref.media === "photo" ? "[photo]" : ref.media ? "[file]" : "");
+  return t("web.echo_reply", quoted.sender.slice(0, 80), words);
+}
+
 /** Keep the echo in a single platform message, including its attachment names. */
 function webEchoPreview(message: string, names: string[]): string {
   const text = wellFormed(message.slice(0, 500));
@@ -2443,12 +2508,22 @@ function handleSendMessage(req: IncomingMessage, res: ServerResponse, ctx: WebAp
         json(res, 400, { error: `${issue.path.join(".") || "body"}: ${issue.message}` });
         return;
       }
-      const { instance, message: typed, attachments = [] } = parsed.data;
+      const { instance, message: typed, attachments = [], replyTo } = parsed.data;
       // #1920 step 2b: a guest writes only to an in-scope instance, while guests may chat, and never a command.
       const guest = guestRequestOf(req);
       const refused = guestChatRefusal(guest, instance);
       if (refused) { json(res, refused.status, { error: refused.error }); return; }
       if (guest && guestCommandText(typed)) { json(res, 403, { error: "guest_no_commands" }); return; }
+      // #2272: a reply names a message this chat still keeps — and, for a guest, one it may see. What it quotes is read
+      // from that row here, never taken from the page.
+      let quoted: WebChatMessage | undefined;
+      if (replyTo) {
+        quoted = ctx.webChatHistory?.find(instance, replyTo.boot, replyTo.id);
+        if (!quoted || quoted.effectTrial || (guest && !guestSeesMessage(quoted, guest, guest.scope()))) {
+          json(res, 409, { error: t("web.reply_gone"), reason: "reply_gone" });
+          return;
+        }
+      }
       const registered = registeredChatInstance(ctx, instance);
       if (!registered && !ctx.instanceIpcClients.has(instance)) {
         json(res, 404, { error: `Instance not found: ${instance}` });
@@ -2495,8 +2570,10 @@ function handleSendMessage(req: IncomingMessage, res: ServerResponse, ctx: WebAp
       const topicId = ctx.fleetConfig?.instances[instance]?.topic_id;
       const canEcho = ctx.fleetConfig?.web?.echo_to_channel !== false
         && !ctx.isClassicInstance?.(instance) && syncAdapter && groupId && topicId != null;
-      // Add no runtime credentials or local attachment paths to the display copy.
-      const preview = webEchoPreview(message, files.map(f => f.name));
+      // Add no runtime credentials or local attachment paths to the display copy. A reply opens with the line it
+      // answers (#2272) — quoted only if that message reached the channel; a web-only one is named, never copied out.
+      const quoteLine = quoted ? webReplyEchoLine(quoted) : "";
+      const preview = (quoteLine ? `${quoteLine}\n` : "") + webEchoPreview(message, files.map(f => f.name));
       // ClassicBot echo (#1320 part B): same ordering lane, each room's setting (#2054: on unless it says false, or
       // the fleet-wide switch is off for a room that is unset) resolved at send time inside sendClassicWebEcho.
       const canClassicEcho = ctx.isClassicInstance?.(instance) === true && !!ctx.sendClassicWebEcho;
@@ -2532,6 +2609,8 @@ function handleSendMessage(req: IncomingMessage, res: ServerResponse, ctx: WebAp
             ...(guest ? { web_guest: "1" } : {}),          // #1920: "[user:… via web (guest), id:…]" (authority none)
             adapter_id: syncAdapter?.id,
             ...delivery.meta,
+            // #2272: `(reply_to: "…")`, as a Discord or Telegram reply gives the agent.
+            ...(quoted ? { reply_to_text: webChatReplyText(quoted) } : {}),
           },
         });
       } catch (err) {
@@ -2566,7 +2645,8 @@ function handleSendMessage(req: IncomingMessage, res: ServerResponse, ctx: WebAp
       ctx.lastInboundUser.set(instance, person.name);
       ctx.eventLog?.logActivity("message", person.name, (message || `[${files.length} file(s)]`).slice(0, 200), instance);
       // #1920: the account that wrote it (a guest sees its own); channel-visible once its copy was sent (above).
-      ctx.emitSseEvent("message", { instance, sender: person.name, role: "user", text: message, ts, attachments: files.map(publicAttachment), messageId, ...(person.bound ? { from: person.voterKey } : {}) });
+      ctx.emitSseEvent("message", { instance, sender: person.name, role: "user", text: message, ts, attachments: files.map(publicAttachment), messageId, ...(person.bound ? { from: person.voterKey } : {}),
+        ...(quoted ? { replyTo: webChatReplyRef(quoted) } : {}) });
       json(res, 200, { sent: true, messageId });
     } catch {
       json(res, 400, { error: "Invalid JSON" });

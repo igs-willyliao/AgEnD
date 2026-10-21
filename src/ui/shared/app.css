@@ -626,6 +626,24 @@ img.amb-p { object-fit: contain; }
 .pv-code { flex: 1; min-height: 0; margin: 0; overflow: auto; font-family: var(--font-mono); font-size: var(--fs-xs); line-height: 1.5;
   background: var(--surface); border-radius: var(--r-sm); padding: var(--s-3); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
 .msg.flash { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: var(--r-sm); transition: outline-color var(--t-med); }
+/* #2272: a message's reply action (top right, on hover or focus), the quote a reply shows, the message menu, a swipe. */
+.msg[data-key] { position: relative; }
+.msg[data-key]:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: var(--r-sm); }
+.msg-actions { position: absolute; top: -6px; right: 0; z-index: 2; display: flex; gap: var(--s-1); padding: 2px; border-radius: var(--r-sm);
+  background: var(--surface); box-shadow: var(--shadow-1); opacity: 0; pointer-events: none; transition: opacity var(--t-fast); }
+.msg:hover > .msg-actions, .msg:focus-within > .msg-actions { opacity: 1; pointer-events: auto; }
+@media (hover: none) { .msg-actions { display: none; } }
+.msg-quote { display: flex; align-items: center; gap: 4px; max-width: 100%; margin: 0 0 4px; padding: 2px var(--s-2); border: 0;
+  border-left: 3px solid var(--border-strong, var(--border)); border-radius: var(--r-sm); background: transparent; color: var(--text-3);
+  font: inherit; font-size: var(--fs-sm); text-align: left; cursor: pointer; overflow: hidden; }
+.msg.user .msg-quote { margin-left: auto; }
+.msg-quote:hover, .msg-quote:focus-visible { color: var(--text-2); background: var(--surface-2); outline: none; }
+.msg-quote .quote-sender { font-weight: var(--fw-semibold); white-space: nowrap; }
+.msg-quote .quote-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msg-menu { position: fixed; z-index: 60; min-width: 180px; padding: var(--s-1); border-radius: var(--r-md); background: var(--surface);
+  box-shadow: var(--shadow-2); display: flex; flex-direction: column; }
+.msg[data-key] { transition: transform var(--t-fast); }
+.msg.swipe-ready { box-shadow: 3px 0 0 var(--accent); border-radius: var(--r-sm); }   /* let go now: a reply */
 @media (max-width: 899px) {
   .only-wide { display: none; }
   .pv-divider { display: none; }
@@ -741,6 +759,13 @@ img.amb-p { object-fit: contain; }
 /* #1920: a guest's note under the composer — on a phone too, where the key hints are hidden. */
 .guest-note { margin: 2px 0 0; font-size: var(--fs-xs); color: var(--text-3); text-align: center; }
 .pending-files { display: flex; flex-wrap: wrap; gap: var(--s-2); padding: var(--s-2) var(--s-2) 0; }
+/* #2272: replying — the bar above the composer (who and what is answered; ✕ / Esc cancels). */
+.reply-bar { display: flex; align-items: center; gap: var(--s-2); min-width: 0; margin: var(--s-2) var(--s-2) 0; padding: 4px var(--s-2) 4px var(--s-3);
+  border-left: 3px solid var(--accent); border-radius: var(--r-sm); background: var(--surface-2); font-size: var(--fs-sm); }
+.reply-bar .reply-mark { color: var(--accent); }
+.reply-bar .reply-label { font-weight: var(--fw-semibold); white-space: nowrap; }
+.reply-bar .reply-text { flex: 1; min-width: 0; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reply-bar .reply-cancel { flex: none; width: 28px; height: 28px; }
 .file-chip { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); padding: 4px var(--s-2); border-radius: var(--r-md); background: var(--bg); max-width: 320px; }
 .file-chip img { width: 28px; height: 28px; object-fit: cover; border-radius: 4px; }
 .file-chip .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
@@ -1026,6 +1051,11 @@ body.side-resizing, body.side-resizing * { cursor: col-resize !important; user-s
 .u-meter { height: 10px; border-radius: var(--r-full); background: var(--surface-2); overflow: hidden; }
 .u-fill { height: 100%; width: 0; min-width: 3px; border-radius: var(--r-full); background: var(--accent); transition: width 0.3s var(--ease); }
 .u-fill.warn { background: var(--warn); } .u-fill.crit { background: var(--danger); }
+/* Last known numbers (the live read failed): greyed, so they never read as live; the mark says when they were read. */
+.u-provider.is-stale .u-pct, .u-provider.is-stale .u-val, .u-provider.is-stale .u-status { color: var(--text-3); }
+.u-provider.is-stale .u-fill { background: var(--text-3); }
+.u-stale { font-weight: var(--fw-semibold); }
+.u-stale-detail { color: var(--text-3); font-size: var(--fs-xs); }
 .u-sub { color: var(--text-3); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
 .u-err { color: var(--warn); font-size: var(--fs-sm); }
 .u-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); }
@@ -1181,6 +1211,18 @@ textarea.s-yaml { white-space: pre; overflow-x: auto; }
 .op-line { display: flex; align-items: center; justify-content: center; gap: var(--s-2); }
 .op-line.ok { color: var(--ok); }
 .op-line.bad { color: var(--danger); }
+/* #2233: the backend sign-in dialog and Settings' list */
+.signin-field { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; margin: var(--s-2) 0; }
+.signin-label { color: var(--text-2); font-size: var(--fs-xs); min-width: 6em; }
+.signin-value { font-size: var(--fs-md); letter-spacing: 0.04em; user-select: all; word-break: break-all; }
+.signin-url { color: var(--text-2); font-size: var(--fs-xs); word-break: break-all; }
+.signin-note { color: var(--text-2); font-size: var(--fs-xs); }
+.signin-ok { color: var(--ok); }
+.signin-message { white-space: pre-wrap; }
+.signin-lines { margin: var(--s-2) 0 0; padding-left: 1.2em; color: var(--text-2); font-size: var(--fs-xs); white-space: pre-wrap; }
+.signin-list { margin-top: var(--s-4); }
+.signin-list code { font-size: var(--fs-xs); word-break: break-all; }
+.signin-list .s-meta { white-space: normal; max-width: none; overflow: visible; }
 @media (max-width: 899px) {
   .grid2 { grid-template-columns: minmax(0, 1fr); }
   .se-row { grid-template-columns: minmax(0, 1fr) auto auto; }
