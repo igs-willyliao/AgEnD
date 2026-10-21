@@ -393,7 +393,7 @@ describe("3g. a main task's tile says who works on it now, not only who owns it"
     let t = await tile(board("claimed", [{ status: "claimed", assignee: "beta" }, { status: "open", assignee: "alpha" }]), "now1");
     expect(t.querySelector(".tb-tile-now").textContent).toBe("Working onS-1Review the API");
     expect(t.querySelector(".tb-tile-foot .tb-who").textContent).toBe("beta");
-    expect(t.querySelector(".tb-tile-foot .tb-who").getAttribute("title")).toBe("Main task owner: alpha");
+    expect(t.querySelector(".tb-tile-foot .tb-person").getAttribute("title")).toBe("Main task owner: alpha");
     t = await tile(board("blocked", [{ status: "blocked", assignee: "beta" }]), "now2");
     expect(t.querySelector(".tb-now-label").textContent).toBe("Blocked");
     t = await tile(board("open", [{ status: "open", assignee: null, unmetDeps: [] }, { status: "open", assignee: "beta", unmetDeps: ["S-1"] }]), "now3");
@@ -402,6 +402,42 @@ describe("3g. a main task's tile says who works on it now, not only who owns it"
     t = await tile(board("review", [{ status: "done", assignee: "beta" }]), "now4");
     expect(t.querySelector(".tb-tile-now")).toBeNull();
     expect(t.querySelector(".tb-tile-foot .tb-who").textContent).toBe("Waiting for you");
+  });
+});
+
+describe("3h. taskhall's looks: the card opens as a drawer; a tile's people have a round initial", () => {
+  it("the initial takes an instance's identity colour; a person, or nobody, has none", async () => {
+    const person = { ...REVIEW_CARD, id: "M-2", uuid: "u2", status: "open", assignee: "Ann" };
+    const nobody = { ...REVIEW_CARD, id: "M-3", uuid: "u3", status: "open", assignee: null };
+    handler = (path) => (path === "/ui/tasks/board" ? { ...BOARD, cards: [REVIEW_CARD, person, nobody] } : {});
+    await p.mount(h(fleet.FleetPanel, { route: { panel: "fleet", tab: "tasks" }, navKey: "fleet:tasks|who|en" }));
+    await settle(6);
+    p.root.querySelector(".tb-project-open").click(); await settle(6);
+    const foot = (id: string) => p.root.querySelector(`[data-tile="${id}"] .tb-tile-foot`);
+    expect(foot("M-1").querySelector(".tb-av").textContent).toBe("A");
+    expect(foot("M-1").querySelector(".tb-who").textContent).toBe("alpha");
+    expect(foot("M-1").querySelector(".tb-av").style["--id-light"]).toMatch(/^#[0-9a-f]{6}$/);   // alpha is an instance
+    expect(foot("M-2").querySelector(".tb-av").textContent).toBe("A");
+    expect(foot("M-2").querySelector(".tb-av").style["--id-light"]).toBeFalsy();                    // Ann is a person
+    expect(foot("M-3").querySelector(".tb-av")).toBeNull();
+    expect(foot("M-3").querySelector(".tb-person.none .tb-who").textContent).toBe("Unassigned");
+  });
+
+  it("a tile's title opens the card in a drawer (a phone keeps the sheet: the stylesheet's), its assignee with the initial", async () => {
+    handler = (path, init) => {
+      if (path === "/ui/tasks/board") return BOARD;
+      if (path === "/ui/tasks/cards/M-1" && (init.method ?? "GET") === "GET") return { card: REVIEW_CARD, parent: null, children: [], comments: [], logs: [], history: [] };
+      return {};
+    };
+    await p.mount(h(fleet.FleetPanel, { route: { panel: "fleet", tab: "tasks" }, navKey: "fleet:tasks|drawer|en" }));
+    await settle(6);
+    p.root.querySelector(".tb-project-open").click(); await settle(6);
+    p.root.querySelector('[data-tile="M-1"] .tb-tile-title').click(); await settle(8);
+    const d = p.root.querySelector("dialog");
+    expect(d.className).toBe("dlg dlg-wide dlg-drawer");
+    expect(d.querySelector(".tc-meta .tb-person .tb-av").textContent).toBe("A");
+    d.querySelector(".dlg-x").click(); await settle(4);                     // closed: ?card= leaves the address
+    expect(p.root.querySelector("dialog")).toBeNull();
   });
 });
 

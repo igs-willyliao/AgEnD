@@ -14,7 +14,7 @@ import { Empty, ErrorState, Skeleton } from "/assets/ui-states.js";
 import { Icon } from "/assets/ui-icons.js";
 import { Menu } from "/assets/ui-menu.js";
 import { toast } from "/assets/ui-toast.js";
-import { AskHost, COLUMNS, NO_PROJECT, ProgressBar, StatusPill, UNASSIGNED, answerBlocked, boardApi, currentWork, dropNeighbours, errorText, followsSubs, moveCard, onPublicLink, projectKey, projectStats, readStored, recentlyDone, relTime, workersOf, wrapUpText, writeStored } from "./fleet-task-common.js";
+import { AskHost, COLUMNS, NO_PROJECT, ProgressBar, StatusPill, UNASSIGNED, Who, answerBlocked, boardApi, currentWork, dropNeighbours, errorText, followsSubs, moveCard, onPublicLink, projectKey, projectStats, readStored, recentlyDone, relTime, workersOf, wrapUpText, writeStored } from "./fleet-task-common.js";
 import { CardDialog } from "./fleet-task-card.js";
 
 const PROJECT_KEY = "agend_tasks_project";
@@ -442,9 +442,9 @@ function Tile({ card, dragging, flash, subs = [], expanded, writable, onToggleSu
       <span class=${`tb-now-label st-${now.tone}`}>${t(now.label)}</span><span class="tb-code">${now.cards[0].id}</span>
       <span class="tb-now-title">${now.cards[0].title}</span>${now.cards.length > 1 ? html`<span class="muted">${t("tasks.moreCards", now.cards.length - 1)}</span>` : null}</div>` : null}
     <div class="tb-tile-foot">
-      ${now ? html`<span class="tb-who" title=${t("tasks.ownerTip", card.assignee || t("tasks.nobody"))}>${workers.map((w) => w || t("tasks.nobody")).join(", ")}</span>`
+      ${now ? html`<span class="tb-people">${workers.map((w) => html`<${Who} key=${w} name=${w} empty=${t("tasks.nobody")} title=${t("tasks.ownerTip", card.assignee || t("tasks.nobody"))} />`)}</span>`
         : hasSubs && card.status === "review" ? html`<span class="tb-who tb-now-label st-review" title=${t("tasks.ownerTip", card.assignee || t("tasks.nobody"))}>${t("tasks.review")}</span>`
-        : html`<span class="tb-who">${card.assignee || "—"}</span>`}
+        : html`<${Who} name=${card.assignee} empty=${t("tasks.nobody")} />`}
       <span class="tb-tile-stats">
         ${card.acceptance.length ? html`<span class=${accepted === card.acceptance.length ? "all" : ""} title=${t(card.kind === "main" ? "tasks.definition" : "tasks.acceptance")}><${Icon} name="check" size=${13} />${accepted}/${card.acceptance.length}</span>` : null}
         ${card.unmetDeps.length ? html`<span title=${t("tasks.waitsFor", card.unmetDeps.join(", "))}><${Icon} name="clock" size=${13} /></span>` : null}
