@@ -1935,7 +1935,8 @@ export class TaskBoard {
       if (r === "cancelled") return card.status === "cancelled" && own;
       if (isFinished(card)) return false;
       if (r === "decide") return handedOut && card.status === "blocked";
-      if (r === "to_confirm") return handedOut && card.status === "review";
+      // #2341 review: and still waiting for the person — its confirmation not switched off during the gather.
+      if (r === "to_confirm") return handedOut && card.status === "review" && requiresReview(card);
       if (!own) return false;
       if (r === "wrap_up") return card.status === "review" && wrapUpGap(card) !== null;
       if (r === "assigned") return !waiting;
