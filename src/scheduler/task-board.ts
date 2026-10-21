@@ -225,10 +225,11 @@ export interface CardEvent {
  * Why an instance hears about one of its cards (step 2's wakes, task-board-waker.ts): someone else assigned it,
  * started it, sent it back, answered its blocked question, commented, or finished the last card it waited for; the
  * person confirmed it (its assignee and its dispatcher hear); it is blocked and the instance handed it out (decide);
+ * it went to the person for confirmation and the instance handed it out, so it tells them (to_confirm);
  * a main task went to the person by itself before its owner wrapped it up (wrap_up); or someone else cancelled it — a
  * main task's cancel takes its unfinished sub tasks down with it, and their assignees hear (cancelled).
  */
-export type WakeReason = "assigned" | "start" | "sent_back" | "answered" | "comment" | "ready" | "decide" | "approved" | "wrap_up" | "cancelled";
+export type WakeReason = "assigned" | "start" | "sent_back" | "answered" | "comment" | "ready" | "decide" | "to_confirm" | "approved" | "wrap_up" | "cancelled";
 
 /** One card's news for one instance from one committed write. Never sent to a page (it carries titles and text). */
 export interface Wake {
@@ -1875,6 +1876,8 @@ export class TaskBoard {
           add(card, card.assignee, "cancelled", e.actor, why);
           continue;
         }
+        // Its dispatcher tells the person it waits for them (not the board).
+        if (d.to === "review" && !isPerson(e.actor) && requiresReview(card)) add(card, dispatcherOf(), "to_confirm", e.actor);
         if (d.auto) {
           if (d.to === "review" && card.kind === "main" && wrapUpGap(card)) add(card, card.assignee, "wrap_up", e.actor);
           continue;
@@ -1919,6 +1922,7 @@ export class TaskBoard {
       if (r === "cancelled") return card.status === "cancelled" && own;
       if (isFinished(card)) return false;
       if (r === "decide") return handedOut && card.status === "blocked";
+      if (r === "to_confirm") return handedOut && card.status === "review";
       if (!own) return false;
       if (r === "wrap_up") return card.status === "review" && wrapUpGap(card) !== null;
       if (r === "assigned") return !waiting;

@@ -218,6 +218,7 @@ instance hears what someone else did to a card that is its own, or that it hande
 | comment | the assignee | a comment by someone else (once the card can start) |
 | ready | the assignee | every card it waited for is done — by hand or by the board's own move |
 | decide | the dispatcher | its card got blocked on a question: ask the person, answer it on the card |
+| to confirm | the dispatcher | its card went to the person for confirmation: tell them (and what it still lacks) |
 | approved | the assignee and the dispatcher | the person confirmed it, with their note |
 | wrap up | the main task's owner | it went to review by itself, its definition of done or result still missing |
 | cancelled | the assignee | someone else cancelled it — or its main task, taking it down — with why |
