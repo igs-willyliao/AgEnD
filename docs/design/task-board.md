@@ -259,6 +259,13 @@ confirming and sending back work, and answering a blocked card, happen in the ch
   admin's only, within 10 minutes — is the reason or the answer. The inbound handler hands such a reply to the hub
   after access control and the dedup claim and before routing; anything else (another person, another message, a
   lapsed prompt) flows on to the instance as before. The outcome is said as a reply to the reply.
+- **Its boundaries (#2306 review).** One prompt per world, card, person and verb at a time, reserved before the send and
+  released when it fails or lapses; at most 32 open at once. A prompt keeps whose card it is and its world as it was
+  (connection, place, notice room): if the instance moved to another world, the connection was replaced or the room
+  changed — while the prompt was on its way or after — it takes no reply. A reply is found by where its prompt is,
+  whichever bot received it (a sibling bot in a shared Discord guild may get it first), and judged by the prompt's
+  world's admins. Over the public link a task item whose card the board hides there (a hidden assignee, creator or
+  dispatcher) is left out of `/ui/poll`'s Needs you; the link's page has no stream.
 - **Who acts.** The person, named by the platform (`person: <username>`), through the board's rules — the same as a
   signed-in page; the web's Needs you list links each card to its dialog.
 
