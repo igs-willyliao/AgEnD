@@ -8,7 +8,8 @@
 //   reason; the agent finishes again; Confirm: Done, the project at 100 %. On a desk also Alt+→ on a second card's
 //   title moves it a column. A phone never scrolls sideways.
 // - the public link (each case's board, same look): the read-only note, no write control anywhere (Home, the project,
-//   the card), tiles not draggable, Alt+→ does nothing, and a write sent anyway is refused.
+//   the card), tiles not draggable, Alt+→ does nothing, and a write sent anyway is refused — the old task list's
+//   create too.
 // Every page logs no error (CSP violations included).
 //   PW_DIR=~/.cache/agend-smoke/pw REPO=<checkout> OUT=<dir> FONTCONFIG_FILE=/etc/fonts/fonts.conf \
 //   npx --prefix <checkout> tsx scripts/manual/smoke/smoke-2246-task-board.mts
@@ -211,15 +212,20 @@ for (const c of matrix()) {
     await pp.page.screenshot({ path: shotPath(SMOKE, c, "8-public-card") });
     const status = await pp.page.evaluate(async () => (await fetch("/ui/tasks/projects", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "over the link" }) })).status);
     pchk.writeRefused = status >= 400 && !db.board.listProjects(true).some((x: any) => x.name === "over the link");
+    // The old task list's create too (review round 2): it would open a card on the board.
+    const cards = db.board.boardCards().length;
+    const legacy = await pp.page.evaluate(async () => (await fetch("/ui/tasks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "over the link" }) })).status);
+    pchk.legacyCreateRefused = legacy >= 400 && db.board.boardCards().length === cards;
     if (phone) pchk.phoneNoSideScroll = await noSideScroll(pp.page);
   } catch (e) {
     pchk.ranToTheEnd = false;
     console.log(String(e).slice(0, 500));
     await pp.page.screenshot({ path: shotPath(SMOKE, c, "public-failure") }).catch(() => {});
   }
-  // The refused write above is the smoke's own: its 403 is expected, nothing else is.
-  const own = (e: string) => /status of 403/.test(e) && /\/ui\/tasks\/projects$/.test(e);
-  pchk.writeRefusalLogged = pp.errors.filter(own).length === 1;
+  // The refused write above is the smoke's own: its refusal (the gateway's 404, or the handler's 403) is expected,
+  // nothing else is.
+  const own = (e: string) => /status of 40[34]/.test(e) && /\/ui\/tasks(\/projects)?$/.test(e);
+  pchk.writeRefusalLogged = pp.errors.filter(own).length === 2;
   pchk.noErrors = pp.errors.filter((e) => !own(e)).length === 0;
   record(`public-link-${name}`, pchk, pp.errors.filter((e) => !own(e)));
   await pp.ctx.close();
