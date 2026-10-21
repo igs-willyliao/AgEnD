@@ -214,6 +214,23 @@ function boardHiding(ctx: WebApiContext, gateway: boolean) {
 }
 
 /**
+ * Chat history as the public link may see it (#2341 review): a status line that names board cards (the daily summary)
+ * is withheld while one of them is hidden there now — or no longer on the board — read when asked, so a card hidden
+ * after the line was written is withheld too. Off the link, as is. The cards are read in one query per answer.
+ */
+function visibleMessages<T extends { cards?: string[] }>(ctx: WebApiContext, gateway: boolean, messages: T[]): T[] {
+  if (!gateway) return messages;
+  const named = [...new Set(messages.flatMap((m) => m.cards ?? []))];
+  if (!named.length) return messages;
+  const board = ctx.scheduler?.db.board;
+  const { hidden } = boardHiding(ctx, true);
+  let found: Map<string, Parameters<typeof hidden>[0]>;
+  try { found = new Map((board ? board.cardsByCode(named) : []).map((c) => [c.code, c])); } catch { found = new Map(); }
+  const withheld = new Set(named.filter((code) => { const c = found.get(code); return !c || hidden(c); }));
+  return messages.filter((m) => !(m.cards ?? []).some((code) => withheld.has(code)));
+}
+
+/**
  * Needs you as the public link may see it (#2306 review): a task item whose card the board hides there — or a card
  * the board no longer has — is left out, with its title and question; everything else as listed. Off the link, as is.
  * The link reads Needs you by /ui/poll only: its page has no stream (/ui/events answers it 404).
@@ -1399,7 +1416,8 @@ export function handleWebRequest(
     }
     json(res, 200, {
       status: ctx.getUiStatus(),
-      messages: history ? (fresh ? history.after(0) : history.replayFor(parseLastEventId(after))) : [],
+      // #2341 review: over the public link, without a summary line that names a card hidden there.
+      messages: history ? visibleMessages(ctx, !!gatewayRequestContext(req), fresh ? history.after(0) : history.replayFor(parseLastEventId(after))) : [],
       // The ticks too, so polling never has to re-read a chat's history — that read would count as the person's
       // activity; this poll does not (isPassiveWebRead).
       deliveries: history ? history.deliveries() : [],
@@ -1509,7 +1527,8 @@ export function handleWebRequest(
     }
     // #1920 §5.2: a guest gets what the channel showed of it, and its own messages (the gate checked the scope).
     const guest = guestRequestOf(req);
-    const messages = !ctx.webChatHistory ? [] : guest ? guestHistory(ctx.webChatHistory, instance, limit, guest, guest.scope()) : ctx.webChatHistory.list(instance, limit);
+    const messages = !ctx.webChatHistory ? [] : guest ? guestHistory(ctx.webChatHistory, instance, limit, guest, guest.scope())
+      : visibleMessages(ctx, !!gatewayRequestContext(req), ctx.webChatHistory.list(instance, limit));
     json(res, 200, { messages, boot: ctx.webChatHistory?.boot ?? null, lastId: ctx.webChatHistory?.lastId ?? 0 });
     return true;
   }

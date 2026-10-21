@@ -538,6 +538,7 @@ The board: Fleet › Tasks on the dashboard.
 - Each platform lists the cards of its own instances; a card no platform's instance holds (nobody's, a person's) goes to the first one.
 - A day when nothing waits and nothing moved sends nothing. A summary missed while AgEnD was down goes out when it is back that day. The first one after an upgrade comes the next morning.
 - `"off"` turns it off; the change applies at the next minute's check.
+- Over the public link, a summary that names a card hidden there (an instance with `cross_instance_visibility: hidden` as its assignee, creator or dispatcher), or a card no longer on the board, is not shown.
 
 ## Hang detection
 

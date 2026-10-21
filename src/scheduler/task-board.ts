@@ -1073,6 +1073,16 @@ export class TaskBoard {
     }).sort((a, b) => a.since.localeCompare(b.since));
   }
 
+  /** Cards by their numbers, in one read (the ones that exist; #2341 review: the cards a summary line named). */
+  cardsByCode(codes: string[]): Card[] {
+    const out: Card[] = [];
+    for (let i = 0; i < codes.length; i += 500) {
+      const chunk = codes.slice(i, i + 500);
+      out.push(...(this.db.prepare(`SELECT * FROM tasks WHERE code IN (${chunk.map(() => "?").join(", ")})`).all(...chunk) as Row[]).map(toCard));
+    }
+    return out;
+  }
+
   /**
    * Step 3, the daily summary (task-board-summary.ts): what waits for the person now, what got done and what was
    * opened in [since, until) (not cancelled), and every live main task's project and assignee.

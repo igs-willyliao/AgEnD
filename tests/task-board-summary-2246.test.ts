@@ -16,6 +16,11 @@ import { Scheduler } from "../src/scheduler/index.js";
 import { FleetManager } from "../src/fleet-manager.js";
 import { setLocale, t } from "../src/locale.js";
 import { validateFleetConfig } from "../src/config-validator.js";
+import { EventEmitter } from "node:events";
+import { handleWebRequest } from "../src/web-api.js";
+import { WebSessionStore, csrfTokenFor, tokenEpoch } from "../src/web-session.js";
+import { bindGatewayRequest } from "../src/web-request-context.js";
+import { WebChatHistory, type StoredWebChatMessage } from "../src/web-chat-history.js";
 
 const dirs: string[] = [];
 afterEach(() => { setLocale("en"); for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
@@ -245,5 +250,92 @@ describe("in the fleet: each chat world's General gets its own instances' cards;
     expect(web.map((m) => m.instance)).toEqual(["general"]);
     expect(web[0]!.text).toMatch(/Rewards API[\s\S]*Event page/);
     scheduler.db.close();
+  });
+});
+
+/** One read through the real web routes as the public link's page (a gateway admin session) or the local page. */
+function read(fm: Record<string, any>, path: string, local = false) {
+  const TOKEN = "c".repeat(48);
+  const sessions = new WebSessionStore(), exposureId = "a".repeat(32), pub = "https://sample.trycloudflare.com", origin = local ? "http://127.0.0.1:19280" : pub;
+  const s = sessions.create({ tier: "admin", surface: local ? "local" : "gateway", exposureId: local ? undefined : exposureId, label: "t", tokenEpoch: tokenEpoch(TOKEN) } as never);
+  const headers = { host: new URL(origin).host, cookie: `${local ? "" : "__Host-"}agend_session=${s.sessionId}`, origin, "sec-fetch-site": "same-origin", "x-agend-csrf": csrfTokenFor(s.sessionId) };
+  return new Promise<any>((resolve) => {
+    const req = Object.assign(new EventEmitter(), { method: "GET", url: path, headers, destroy: vi.fn() });
+    if (!local) bindGatewayRequest(req as never, { surface: "gateway", exposureId, expectedOrigin: pub, isCurrent: () => true });
+    const res = Object.assign(new EventEmitter(), { headersSent: false, destroyed: false, setHeader() {}, writeHead() {}, end: (t = "") => resolve(t ? JSON.parse(String(t)) : null) });
+    handleWebRequest(req as never, res as never, new URL(path, origin), { webToken: TOKEN, webSessions: sessions, scheduler: fm.scheduler, fleetConfig: fm.fleetConfig,
+      webChatHistory: fm.webChatHistory, logger: { debug() {}, info() {}, warn() {}, error() {} }, getUiStatus: () => ({ instances: [] }), listWebPrompts: () => [], needsYouItems: () => [] } as never);
+    req.emit("end");
+  });
+}
+
+describe("over the public link, the summary is withheld while it names a card hidden there (#2341 review)", () => {
+  function fleetWithHidden() {
+    setLocale("en");
+    const d = tempDir();
+    writeFileSync(join(d, "fleet.yaml"), "defaults: {}\ninstances: {}\n");
+    const fm = new FleetManager(d) as unknown as Record<string, any>;
+    let clock = new Date("2026-10-20T02:00:00Z");
+    const scheduler = schedulerIn(d, () => clock);
+    fm.scheduler = scheduler;
+    fm.fleetConfig = { defaults: {}, instances: { general: { general_topic: true }, "dev-a": {}, secret: { cross_instance_visibility: "hidden" } } };
+    const b = scheduler.db.board;
+    const make = (actor: { kind: "person" | "instance"; name: string }, title: string, assignee: string) => b.createCards(actor, { cards: [{ title, assignee }] }).cards[0]!;
+    const hidden = make({ kind: "instance", name: "secret" }, "HIDDEN_CARD_TITLE_2341", "dev-a");          // handed out by the hidden one
+    b.moveCard(ANN_, hidden.code, "claimed"); b.moveCard(ANN_, hidden.code, "blocked", { reason: "PRIVATE_BLOCKED_REASON_2341" });
+    const open = make(ANN_, "Visible work", "dev-a");
+    void clock; clock = new Date("2026-10-21T02:00:00Z");
+    return { fm, scheduler, b, hidden, open };
+  }
+  const ANN_ = { kind: "person" as const, name: "Ann" };
+  const summaries = (body: any) => (body.messages as any[]).filter((m) => m.role === "status").map((m) => m.text as string);
+
+  it("a card hidden from the start: the link's poll and history leave the summary out; the local page has it, with the cards it names", async () => {
+    const { fm, scheduler, hidden } = fleetWithHidden();
+    fm.postTaskBoardSummary(new Date("2026-10-20T01:00:00Z"), new Date("2026-10-21T01:00:00Z"));
+    const local = await read(fm, "/ui/history?instance=general", true);
+    expect(summaries(local)).toHaveLength(1);
+    expect(summaries(local)[0]).toContain("HIDDEN_CARD_TITLE_2341");
+    expect(local.messages[0].cards).toContain(hidden.code);
+    for (const path of ["/ui/history?instance=general", "/ui/poll"]) {
+      const link = await read(fm, path);
+      expect(summaries(link), path).toEqual([]);
+      expect(JSON.stringify(link), path).not.toMatch(/HIDDEN_CARD_TITLE_2341|PRIVATE_BLOCKED_REASON_2341/);
+    }
+    // Shown again (the instance no longer hidden): the summary is the link's to read.
+    fm.fleetConfig.instances.secret = {};
+    expect(summaries(await read(fm, "/ui/poll"))).toHaveLength(1);
+    scheduler.db.close();
+  });
+
+  it("a card hidden after the summary was written: withheld from then on; a summary naming only visible cards stays readable", async () => {
+    const { fm, scheduler, b, hidden } = fleetWithHidden();
+    fm.fleetConfig.instances.secret = {};                                // visible when the summary is written
+    fm.postTaskBoardSummary(new Date("2026-10-20T01:00:00Z"), new Date("2026-10-21T01:00:00Z"));
+    b.moveCard(ANN_, hidden.code, "claimed"); b.moveCard(ANN_, hidden.code, "cancelled");
+    b.createCards(ANN_, { cards: [{ title: "New visible work", assignee: "dev-a" }] });                // new in the next window
+    fm.postTaskBoardSummary(new Date("2026-10-21T01:00:00Z"), new Date("2026-10-22T01:00:00Z"));   // names only the visible one
+    expect(summaries(await read(fm, "/ui/poll"))).toHaveLength(2);
+    fm.fleetConfig.instances.secret = { cross_instance_visibility: "hidden" };
+    const link = summaries(await read(fm, "/ui/poll"));
+    expect(link).toHaveLength(1);
+    expect(link[0]).not.toContain("HIDDEN_CARD_TITLE_2341");
+    expect(summaries(await read(fm, "/ui/history?instance=general", true))).toHaveLength(2);    // the local page: both
+    // A card the board no longer has (pruned) cannot be told visible: the line that names it is withheld too.
+    fm.fleetConfig.instances.secret = {};
+    (scheduler.db.board as any).db.prepare("DELETE FROM tasks WHERE title = ?").run("New visible work");
+    expect(summaries(await read(fm, "/ui/poll"))).toHaveLength(1);
+    scheduler.db.close();
+  });
+
+  it("the cards a summary names stay with it across a restart (the row on disk), and only a status line carries them", () => {
+    let rows: StoredWebChatMessage[] = [];
+    const h = new WebChatHistory({ boot: "aa", store: { schedule: (_i, snap) => { rows = snap(); }, remove: async () => {} } });
+    h.record({ instance: "general", sender: "general", role: "status", text: "summary", ts: "2026-10-21T01:00:00Z", cards: ["M-1", "S-2", "M-1", "x", 3] });
+    h.record({ instance: "general", sender: "ann", role: "user", text: "hi", ts: "2026-10-21T01:00:01Z", cards: ["M-9"] });
+    expect(rows.map((r) => r.cards)).toEqual([["M-1", "S-2"], undefined]);
+    const next = new WebChatHistory({ boot: "bb" });
+    next.restore("general", [...rows, { ...rows[1]!, id: 3, cards: ["M-7"] }]);
+    expect(next.list("general", 10).map((m) => m.cards)).toEqual([["M-1", "S-2"], undefined, undefined]);
   });
 });

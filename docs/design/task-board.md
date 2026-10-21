@@ -276,7 +276,10 @@ confirming and sending back work, and answering a blocked card, happen in the ch
   Generals shows the same text in the web chat. The clock looks every minute; the mark (`task-board-summary.json` in
   the data directory: the local date, the end of the time covered) is written before sending, so a send that fails is
   not repeated every minute. At most once a calendar day; a missed one goes out when the fleet is back that day,
-  covering since the last one (at most a week); a quiet day sends nothing; the first day only marks.
+  covering since the last one (at most a week); a quiet day sends nothing; the first day only marks. The web chat's
+  line carries the card numbers it names (`cards`, kept on disk with the row): over the public link `/ui/poll` and
+  `/ui/history` withhold it while one of them is hidden there, read when asked, or is no longer on the board (#2341
+  review).
 
 ## Next
 

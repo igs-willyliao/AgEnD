@@ -13061,6 +13061,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       const summary = buildSummary(read, since, until, { inChat: (assignee) => worldOf(assignee) === world, projects, stats });
       if (isQuiet(summary)) continue;
       const text = renderSummary(summary, { zone, t: (key, ...args) => t(key, ...args), projectOf: (c) => (c.projectId === null ? null : names.get(c.projectId) ?? null) });
+      const cards = [...new Set([...summary.review, ...summary.blocked, ...summary.done, ...summary.created].map((c) => c.code))];
       if (world !== undefined) {
         const adapter = this.worlds.get(world)?.adapter;
         const target = this.fleetNoticeTarget(world);
@@ -13072,7 +13073,8 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
       }
       for (const [name, cfg] of Object.entries(this.fleetConfig?.instances ?? {})) {
         if (cfg.general_topic !== true || (world !== undefined && this.getInstanceAdapterId(name) !== world)) continue;
-        this.emitSseEvent("message", { instance: name, sender: name, role: "status", text, ts: new Date().toISOString() });
+        // #2341 review: with the cards it names, so the public link withholds it while one of them is hidden there.
+        this.emitSseEvent("message", { instance: name, sender: name, role: "status", text, ts: new Date().toISOString(), cards });
       }
     }
   }
@@ -16747,7 +16749,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     const onError = (err: unknown) => this.logger.debug({ err }, "SSE client write failed; evicting");
     if (event === "message" && data && typeof data === "object") {
       // A chat message: record it, and send it WITH its id so a reconnecting stream can ask for what it missed.
-      const m = data as { instance?: unknown; sender?: unknown; text?: unknown; ts?: unknown; attachments?: unknown; messageId?: unknown; role?: unknown; buttons?: unknown; click?: unknown; links?: unknown; channel?: unknown; from?: unknown; replyTo?: unknown };
+      const m = data as { instance?: unknown; sender?: unknown; text?: unknown; ts?: unknown; attachments?: unknown; messageId?: unknown; role?: unknown; buttons?: unknown; click?: unknown; links?: unknown; channel?: unknown; from?: unknown; replyTo?: unknown; cards?: unknown };
       const recorded = this.webChatHistory.record({
         instance: String(m.instance ?? ""), sender: String(m.sender ?? ""), text: String(m.text ?? ""), ts: String(m.ts ?? new Date().toISOString()),
         attachments: Array.isArray(m.attachments) ? m.attachments as WebChatAttachment[] : undefined,
@@ -16759,6 +16761,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         channel: m.channel,
         from: m.from,
         replyTo: m.replyTo,
+        cards: m.cards,
       });
       broadcastSseEvent(this.sseClients, event, recorded, onError, this.webChatHistory.cursorOf(recorded));
       this.searchIndex?.record(chatDoc(recorded));
