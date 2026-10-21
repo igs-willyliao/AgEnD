@@ -194,17 +194,21 @@ function Waiting({ cards, writable, onOpen, reload }) {
   return html`<section class="tb-waiting" aria-label=${t("tasks.waitingTitle")}>
     <h3 class="tb-section-title"><${Icon} name="inbox" size=${16} />${t("tasks.waitingTitle")}</h3>
     <ul class="rows">${[...review, ...blocked].map((c) => html`<li key=${c.id} class="row-item tb-wait-row">
-      <${StatusPill} status=${c.status} />
-      <button type="button" class="tb-wait-title" onClick=${() => onOpen(c.id)}><span class="tb-code">${c.id}</span> ${c.title}
-        ${c.status === "blocked" && c.blockedReason ? html`<span class="tb-wait-reason">${c.blockedReason}</span>` : null}
-        ${c.status === "blocked" && c.dispatcher && c.dispatcher.kind === "instance" && c.dispatcher.name !== c.assignee && fleetNames.has(c.dispatcher.name)
-          ? html`<span class="tb-wait-asked muted">${t("tasks.askedFirst", c.dispatcher.name)}</span>` : null}
-        ${c.status === "review" && wrapUpText(c) ? html`<span class="tb-wait-reason wrapup">${t("tasks.wrapLine", wrapUpText(c))}</span>` : null}</button>
-      ${c.assignee ? html`<span class="muted">${c.assignee}</span>` : null}
-      ${!writable ? null : c.status === "review" ? html`
-        <button type="button" class="btn btn-primary btn-sm" disabled=${busy.has(c.id)} onClick=${() => act(() => moveCard(c, "done"), "tasks.confirmed", c)}><${Icon} name="check" size=${14} />${t("tasks.confirm")}</button>
-        <button type="button" class="btn btn-sm" disabled=${busy.has(c.id)} onClick=${() => act(() => moveCard(c, "claimed"), "tasks.sentBack", c)}>${t("tasks.sendBack")}</button>`
-      : html`<button type="button" class="btn btn-primary btn-sm" disabled=${busy.has(c.id)} onClick=${() => act(() => answerBlocked(c), "tasks.answered", c)}>${t("tasks.answer")}</button>`}
+      <div class="tb-wait-main">
+        <${StatusPill} status=${c.status} />
+        <button type="button" class="tb-wait-title" onClick=${() => onOpen(c.id)}><span class="tb-code">${c.id}</span> ${c.title}
+          ${c.status === "blocked" && c.blockedReason ? html`<span class="tb-wait-reason">${c.blockedReason}</span>` : null}
+          ${c.status === "blocked" && c.dispatcher && c.dispatcher.kind === "instance" && c.dispatcher.name !== c.assignee && fleetNames.has(c.dispatcher.name)
+            ? html`<span class="tb-wait-asked muted">${t("tasks.askedFirst", c.dispatcher.name)}</span>` : null}
+          ${c.status === "review" && wrapUpText(c) ? html`<span class="tb-wait-reason wrapup">${t("tasks.wrapLine", wrapUpText(c))}</span>` : null}</button>
+      </div>
+      <div class="tb-wait-actions">
+        ${c.assignee ? html`<span class="muted">${c.assignee}</span>` : null}
+        ${!writable ? null : c.status === "review" ? html`
+          <button type="button" class="btn btn-primary btn-sm" disabled=${busy.has(c.id)} onClick=${() => act(() => moveCard(c, "done"), "tasks.confirmed", c)}><${Icon} name="check" size=${14} />${t("tasks.confirm")}</button>
+          <button type="button" class="btn btn-sm" disabled=${busy.has(c.id)} onClick=${() => act(() => moveCard(c, "claimed"), "tasks.sentBack", c)}>${t("tasks.sendBack")}</button>`
+        : html`<button type="button" class="btn btn-primary btn-sm" disabled=${busy.has(c.id)} onClick=${() => act(() => answerBlocked(c), "tasks.answered", c)}>${t("tasks.answer")}</button>`}
+      </div>
     </li>`)}</ul>
   </section>`;
 }
