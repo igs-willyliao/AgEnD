@@ -99,6 +99,8 @@ export function getEffectiveInstanceDefaults(
     max_cross_instance_message_bytes: _maxCrossInstanceMessageBytes,
     // #1302: read by the fleet when it posts a notice, so changing the default never touches a daemon's config.
     cross_instance_visibility: _crossInstanceVisibility,
+    // #2246 step 3: the board's daily summary is the fleet's (task-board-summary.ts), read at every look.
+    task_board: _taskBoard,
     ...instanceDefaults
   } = fleetDefaults as FleetDefaults;
   return deepMergeGeneric(

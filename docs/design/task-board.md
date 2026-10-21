@@ -262,7 +262,15 @@ confirming and sending back work, and answering a blocked card, happen in the ch
 - **Who acts.** The person, named by the platform (`person: <username>`), through the board's rules — the same as a
   signed-in page; the web's Needs you list links each card to its dialog.
 
+- **The daily summary** (`task-board-summary.ts`, taskhall's): once a day at `defaults.task_board.summary_at`
+  (default 09:00, the fleet's zone; `off`), each world's General gets what waits for the person and what is blocked now,
+  what got done and what was opened since the last summary, and each active project's progress — its own instances'
+  cards (a card no world's instance holds goes to the primary world), and the projects one of them is in; each of its
+  Generals shows the same text in the web chat. The clock looks every minute; the mark (`task-board-summary.json` in
+  the data directory: the local date, the end of the time covered) is written before sending, so a send that fails is
+  not repeated every minute. At most once a calendar day; a missed one goes out when the fleet is back that day,
+  covering since the last one (at most a week); a quiet day sends nothing; the first day only marks.
+
 ## Next
 
-- **Step 3, rest.** A daily summary of the board; importing a taskhall database; each instance's board work on its
-  details page.
+- **Step 3, rest.** Each instance's board work on its details page (and a list of every instance's on the board).
