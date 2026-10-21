@@ -266,10 +266,11 @@ describe("4. the public link reads the board and changes nothing on it", () => {
     for (const [method, path] of [
       ["POST", "/ui/tasks/cards/M-3"], ["POST", "/ui/tasks/cards/M-3/move"], ["POST", "/ui/tasks/cards/S-1/reorder"], ["POST", "/ui/tasks/projects/2"],
       ["DELETE", "/ui/tasks/cards/M-3"], ["GET", "/ui/tasks/cards/M-3/move"],
+      ["POST", "/ui/tasks"], ["POST", "/ui/tasks/aaaaaaaa-0000-0000-0000-000000000001"],          // the old list's create and update
     ] as const) expect(isPublicWebRoute(method, path), `${method} ${path}`).toBe(false);
   });
 
-  it("the handlers refuse every board write over the link (403), even where the old /ui/tasks/<id> pattern lets the path through", async () => {
+  it("the handlers refuse every board write over the link (403), the old /ui/tasks create and update too", async () => {
     const db = scratchDb();
     db.board.createProject(ANN, { name: "Game" });
     db.board.createCards(ANN, { project: "Game", cards: [{ title: "Ship it", assignee: "dev-a" }] });
@@ -277,23 +278,25 @@ describe("4. the public link reads the board and changes nothing on it", () => {
     for (const [path, body] of [
       ["/ui/tasks/cards", { title: "x" }], ["/ui/tasks/cards/M-1", { goal: "x" }], ["/ui/tasks/cards/M-1/move", { to: "done" }],
       ["/ui/tasks/cards/M-1/reorder", { after: null }], ["/ui/tasks/projects", { name: "Other" }], ["/ui/tasks/projects/1", { archived: true }],
+      ["/ui/tasks", { title: "x" }], [`/ui/tasks/${db.board.getCard("M-1").uuid}`, { action: "update", title: "x" }],
     ] as const) expect(await viaLink(db, "POST", path, body), path).toEqual({ status: 403, body: refused });
+    expect(db.board.boardCards().map((c) => c.code)).toEqual(["M-1"]);
     expect(db.board.getCard("M-1")).toMatchObject({ status: "open", goal: "", version: 1 });
     expect(db.board.listProjects(true).map((p) => [p.name, p.archived])).toEqual([["Game", false]]);
     const read = await viaLink(db, "GET", "/ui/tasks/board");
     expect([read.status, read.body.cards.map((c: any) => c.id)]).toEqual([200, ["M-1"]]);
   });
 
-  it("on the old /ui/tasks/<id> route a public-link session is no person: it never confirms work waiting for one", async () => {
+  it("the old /ui/tasks routes: refused over the link, the person's on the local page; a malformed id is a 400", async () => {
     const db = scratchDb();
     const card = db.board.createCards(ANN, { cards: [{ title: "Ship it", assignee: "dev-a" }] }).cards[0]!;
     db.claimTask(card.uuid, "dev-a", { kind: "instance", name: "dev-a" });
     db.completeTask(card.uuid, "shipped", { kind: "instance", name: "dev-a" });
-    const r = await viaLink(db, "POST", `/ui/tasks/${card.uuid}`, { action: "update", status: "done" });
-    expect([r.status, r.body.error]).toEqual([400, `Task "M-1" is waiting for the person's confirmation`]);
+    expect((await viaLink(db, "POST", `/ui/tasks/${card.uuid}`, { action: "update", status: "done" })).status).toBe(403);
     expect(db.board.getCard("M-1").status).toBe("review");
-    // The local page's session is the person.
     expect((await viaLink(db, "POST", `/ui/tasks/${card.uuid}`, { action: "update", status: "done" }, { local: true })).body.status).toBe("done");
+    expect((await viaLink(db, "POST", "/ui/tasks", { title: "From the page" }, { local: true })).status).toBe(200);
+    expect((await viaLink(db, "POST", "/ui/tasks/%E0%A4%A", { action: "update", status: "done" }, { local: true })).status).toBe(400);
   });
 
   it("cards of instances kept out of sight (cross_instance_visibility: hidden) are left out over the link; the local page shows them", async () => {

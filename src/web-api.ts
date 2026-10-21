@@ -2025,6 +2025,12 @@ export function handleWebRequest(
     return true;
   }
 
+  // #2246: the public link writes no task — the old list's create and update are board writes now (see below).
+  if (method === "POST" && (path === "/ui/tasks" || /^\/ui\/tasks\/[^/]+$/.test(path)) && gatewayRequestContext(req)) {
+    json(res, 403, { error: "task_board_not_over_public_link", code: "forbidden", key: "not_over_public_link" });
+    return true;
+  }
+
   if (method === "POST" && path === "/ui/tasks") {
     if (!ctx.scheduler) {
       json(res, 500, { error: "Scheduler not initialized" });
@@ -2145,9 +2151,9 @@ export function handleWebRequest(
       json(res, 500, { error: "Scheduler not initialized" });
       return true;
     }
-    const id = decodeURIComponent(taskMatch[1]);
     (async () => {
       try {
+        const id = decodeURIComponent(taskMatch[1]);
         const body = await parseBody(req);
         if (!permitWebContinuation(req, res, ctx)) return;
         const parsed = parseOrReject(TaskUpdateSchema, body, res);

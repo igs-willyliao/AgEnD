@@ -83,8 +83,9 @@ sent to them.
 **The temporary public link reads the board and changes nothing.** Confirming, sending back, cancelling and assigning
 are the person's authority, which the public link never carries (docs/web-dashboard.md). Over the link the gateway
 passes only the board's reads (`GET /ui/tasks/board`, `/ui/tasks/cards/<id>`, `/ui/tasks/search`); a write that
-reaches the board anyway is refused (403 `not_over_public_link`), and a request through the gateway is never the
-person (actor `script`, "public-link"). The page says it is read-only there and shows no write controls.
+reaches the board anyway is refused (403 `not_over_public_link`) — the old task list's create and update
+(`POST /ui/tasks`, `/ui/tasks/<id>`) too, since they write the board's rows — and a request through the gateway is
+never the person (actor `script`, "public-link"). The page says it is read-only there and shows no write controls.
 
 **Instances kept out of sight.** Over the public link the board leaves out the cards whose assignee or creator is an
 instance with `cross_instance_visibility: hidden` (in lists, search and by number); a project's numbers still count
