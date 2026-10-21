@@ -73,6 +73,13 @@ register("tasks", {
     "note.review_waiting": "{0} “{1}”: every sub task is done — it waits for your confirmation",
     "note.back_to": "{0} has unfinished sub tasks again: it is back to {1}", "note.deps_done": "{0}'s dependencies are all done: it can start",
     "note.deps_unmet": "Note: {0} not done yet",
+    // #2246 step 3: who works on what (fleet-task-work.js)
+    instances: "Instances", instancesTip: "The fleet's instances and what each works on", instancesHead: "{0} instance(s) · {1} working",
+    workSentBack: "Sent back", workDoing: "In progress", workBlocked: "Blocked", workReview: "Waiting for you", workMain: "Owns",
+    workReady: "Can start", workWaiting: "Waiting on", workSubs: "sub tasks {0}/{1}", workClaimable: "nobody's: can be taken",
+    workWaitsFor: "waits for {0}", workNone: "Nothing on the board", workNewComments: "Comments it has not read yet",
+    workOutside: "Not in the fleet", workFailed: "Could not read who works on what: {0}", workJoin: ", ",
+    detailsBoard: "Task board",
   },
   "zh-TW": {
     open: "待辦", claimed: "進行中", blocked: "卡住", review: "待確認", done: "完成", cancelled: "取消",
@@ -138,6 +145,13 @@ register("tasks", {
     "note.review_waiting": "{0}「{1}」的子任務都完成了，等你確認",
     "note.back_to": "{0} 又有沒完成的子任務，已回到{1}", "note.deps_done": "{0} 的相依都完成了，可以開始",
     "note.deps_unmet": "提醒：{0} 還沒完成",
+    // #2246 step 3：誰在做什麼（fleet-task-work.js）
+    instances: "Instance", instancesTip: "fleet 有哪些 instance、各在做什麼", instancesHead: "{0} 個 · 工作中 {1}",
+    workSentBack: "被退回", workDoing: "進行中", workBlocked: "卡住", workReview: "待確認", workMain: "負責",
+    workReady: "可以開始", workWaiting: "等前置", workSubs: "子任務 {0}/{1}", workClaimable: "沒人負責，可領",
+    workWaitsFor: "等 {0}", workNone: "看板上沒有它的卡", workNewComments: "有它還沒看過的留言",
+    workOutside: "不在 fleet 裡", workFailed: "讀不到工作清單：{0}", workJoin: "、",
+    detailsBoard: "任務看板",
   },
 });
 
@@ -313,6 +327,8 @@ export const boardApi = {
   move: (id, to, input = {}) => boardCall("POST", `/ui/tasks/cards/${enc(id)}/move`, { to, ...input }),
   reorder: (id, after, before) => boardCall("POST", `/ui/tasks/cards/${enc(id)}/reorder`, { after, before }),
   search: (q) => boardCall("GET", `/ui/tasks/search?q=${enc(q)}`),
+  /** #2246 step 3: each instance's work (its `task mine`), or one instance's. */
+  work: (instance) => boardCall("GET", `/ui/tasks/work${instance ? `?instance=${enc(instance)}` : ""}`),
   createProject: (name, description) => boardCall("POST", "/ui/tasks/projects", { name, description }),
   updateProject: (id, patch) => boardCall("POST", `/ui/tasks/projects/${id}`, patch),
 };

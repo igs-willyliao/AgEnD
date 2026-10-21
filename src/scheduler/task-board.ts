@@ -1027,6 +1027,12 @@ export class TaskBoard {
    * (its own open cards, and the unassigned sub tasks of main tasks it coordinates, dependencies done) and what waits
    * on dependencies; comments it has not seen and work sent back; the main tasks it coordinates and how far along.
    */
+  /** Who holds a live card (open, in progress, blocked, waiting for the person): the instances, and any other name. */
+  liveAssignees(): string[] {
+    return (this.db.prepare("SELECT DISTINCT assignee FROM tasks WHERE assignee IS NOT NULL AND status IN ('open', 'claimed', 'blocked', 'review') ORDER BY assignee").all() as Row[])
+      .map((r) => r.assignee as string);
+  }
+
   myWork(name: string): MyWork {
     const mine = (this.db.prepare(`SELECT * FROM tasks WHERE assignee = ? AND status IN ('open', 'claimed', 'blocked', 'review') ORDER BY ${STATUS_ORDER}, ${PRIORITY_ORDER}, sort`)
       .all(name) as Row[]).map(toCard);

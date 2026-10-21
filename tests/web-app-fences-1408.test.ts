@@ -182,7 +182,7 @@ describe("3. a Fleet refresh keeps an open form", () => {
     await p.mount(h(fleet.FleetPanel, { route: { panel: "fleet", tab: "tasks" }, navKey: "fleet:tasks|1|en" }));
     await settle(4);
     p.root.querySelector(".tb-wait-row .btn-primary").click();         // Confirm (held)
-    p.root.querySelector(".list-head .btn").click(); await settle();    // New project
+    p.root.querySelector(".list-head .btn-primary").click(); await settle();    // New project
     const dlg = p.root.querySelector("dialog");
     const name = dlg.querySelector("input");
     name.value = "my draft"; fire(name, "input"); await settle();
@@ -203,13 +203,13 @@ describe("3. a Fleet refresh keeps an open form", () => {
     };
     await p.mount(h(fleet.FleetPanel, { route: { panel: "fleet", tab: "tasks" }, navKey: "fleet:tasks|1|en" }));
     await settle(4);
-    p.root.querySelector(".list-head .btn").click(); await settle();
+    p.root.querySelector(".list-head .btn-primary").click(); await settle();
     const t1 = p.root.querySelector("dialog input"); t1.value = "first"; fire(t1, "input"); await settle();
     [...p.root.querySelectorAll("dialog .btn")].find((b: any) => b.textContent === "Create")!.click(); await settle();
     // The person moves on; on the new tab they open another form and start typing.
     await p.mount(h(fleet.FleetPanel, { route: { panel: "fleet", tab: "teams" }, navKey: "fleet:teams|2|en" }));
     await settle(4);
-    p.root.querySelector(".list-head .btn").click(); await settle();
+    p.root.querySelector(".list-head .btn-primary").click(); await settle();
     const replacement = p.root.querySelector("dialog");
     const t2 = replacement.querySelector("input"); t2.value = "second"; fire(t2, "input"); await settle();
     const gets = requests.filter(r => r === "GET /ui/teams").length;
@@ -252,7 +252,7 @@ describe("3c. the public link shows the board and changes nothing (the server re
     expect(p.root.querySelector(".tb-readonly")?.textContent).toContain("read-only");
     expect(p.root.querySelector(".tb-wait-row")).not.toBeNull();                 // the waiting card is listed…
     expect(p.root.querySelectorAll(".tb-wait-row .btn")).toHaveLength(0);         // …with nothing to answer it with
-    expect(p.root.querySelector(".list-head .btn")).toBeNull();
+    expect(p.root.querySelector(".list-head .btn-primary")).toBeNull();                 // no New project (Instances is a read)
     p.root.querySelector(".tb-project-open").click(); await settle(6);
     expect(p.root.querySelectorAll(".tb-tile")).toHaveLength(2);
     expect([...p.root.querySelectorAll(".tb-tile")].map((el: any) => el.getAttribute("draggable"))).toEqual(["false", "false"]);
@@ -438,6 +438,46 @@ describe("3h. taskhall's looks: the card opens as a drawer; a tile's people have
     expect(d.querySelector(".tc-meta .tb-person .tb-av").textContent).toBe("A");
     d.querySelector(".dlg-x").click(); await settle(4);                     // closed: ?card= leaves the address
     expect(p.root.querySelector("dialog")).toBeNull();
+  });
+});
+
+describe("3i. who works on what: the board's Instance drawer (taskhall's)", () => {
+  it("each instance with its cards in taskhall's order, working ones first, by group; a line opens the card, and the drawer gives way", async () => {
+    const view = (id: string, extra: Record<string, unknown> = {}) => ({ ...REVIEW_CARD, id, uuid: id, title: `Card ${id}`, ...extra });
+    const none = { doing: [], blocked: [], review: [], ready: [], waiting: [], mains: [], sentBack: [], newComments: [] };
+    handler = (path, init) => {
+      if (path === "/ui/tasks/board") return BOARD;
+      if (path === "/ui/tasks/work") return { instances: [
+        { ...none, name: "alpha", review: [view("M-1")], mains: [view("M-7", { progress: { total: 3, open: 1, claimed: 1, blocked: 0, review: 0, done: 1 } })],
+          ready: [view("S-4", { kind: "sub", assignee: null })], waiting: [view("S-5", { kind: "sub", unmetDeps: ["S-4"] })], newComments: ["M-1"] },
+        { ...none, name: "beta", doing: [view("S-2", { kind: "sub", status: "claimed", assignee: "beta" })], sentBack: ["S-2"] },
+        { ...none, name: "Ann", ready: [view("M-9", { assignee: "Ann" })] },
+      ] };
+      if (path === "/ui/tasks/cards/S-2" && (init.method ?? "GET") === "GET") return { card: view("S-2", { kind: "sub", status: "claimed", assignee: "beta" }), parent: null, children: [], comments: [], logs: [], history: [] };
+      return {};
+    };
+    app.appStore.set((st: any) => ({ ...st, exec: { ...st.exec, beta: "working" } }));
+    await p.mount(h(fleet.FleetPanel, { route: { panel: "fleet", tab: "tasks" }, navKey: "fleet:tasks|work|en" }));
+    await settle(6);
+    [...p.root.querySelectorAll(".tb-head .btn")].find((b: any) => b.textContent.includes("Instances"))!.click(); await settle(8);
+    const d = p.root.querySelector("dialog");
+    expect(d.className).toBe("dlg dlg-wide dlg-drawer");
+    expect(d.querySelector(".tw-head").textContent).toBe("3 instance(s) · 1 working");
+    expect([...d.querySelectorAll(".tw-group-head")].map((g: any) => g.textContent)).toEqual(["Other2", "Not in the fleet1"]);
+    const lines = (inst: any) => [...inst.querySelectorAll(".tw-line")].map((l: any) => [l.querySelector(".tw-kind").textContent, l.querySelector(".tb-code").textContent,
+      l.querySelector(".tw-note")?.textContent ?? "", !!l.querySelector(".tw-unread")]);
+    const insts = [...d.querySelectorAll(".tw-inst")];
+    expect(insts.map((i: any) => i.querySelector(".tw-name, .tb-who").textContent)).toEqual(["beta", "alpha", "Ann"]);   // working first
+    expect(lines(insts[0])).toEqual([["Sent back", "S-2", "", false]]);
+    expect(lines(insts[1])).toEqual([
+      ["Waiting for you", "M-1", "", true], ["Owns", "M-7", "sub tasks 1/3", false],
+      ["Can start", "S-4", "nobody's: can be taken", false], ["Waiting on", "S-5", "waits for S-4", false],
+    ]);
+    insts[0].querySelector(".tw-line").click(); await settle(8);
+    const open = [...p.root.querySelectorAll("dialog")];
+    expect(open.map((x: any) => x.getAttribute("aria-label"))).toEqual(["S-2 Card S-2"]);                  // the drawer gave way to the card
+    open[0].querySelector(".dlg-x").click(); await settle(4);
+    app.appStore.set((st: any) => ({ ...st, exec: {} }));
   });
 });
 

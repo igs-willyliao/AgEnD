@@ -2126,7 +2126,7 @@ export function handleWebRequest(
   // ── Task board (scheduler/task-board.ts) ──────────────
   // Reads are the session's; every write is the signed-in person's, through the same rules an instance's tools use.
 
-  if (path === "/ui/tasks/board" || path === "/ui/tasks/search" || path.startsWith("/ui/tasks/cards") || path.startsWith("/ui/tasks/projects")) {
+  if (path === "/ui/tasks/board" || path === "/ui/tasks/search" || path === "/ui/tasks/work" || path.startsWith("/ui/tasks/cards") || path.startsWith("/ui/tasks/projects")) {
     const board = ctx.scheduler?.db.board;
     if (!board) { json(res, 503, { error: "The task board is not available" }); return true; }
     // The temporary public link reads the board and changes nothing on it: confirming, sending back, cancelling and
@@ -2170,6 +2170,27 @@ export function handleWebRequest(
         const body = JSON.stringify({ rev, cards: board.views(cards, scope), projects: board.listProjects(true), stats: board.projectStats() });
         if (key) boardBodies.set(board, { key, body });
         jsonText(res, 200, body);
+        return true;
+      }
+      if (method === "GET" && path === "/ui/tasks/work") {
+        // #2246 step 3: each instance's work on the board — what its `task mine` reads (myWork) — for the board's
+        // Instance list and an instance's Details page (`?instance=`): the fleet's instances and anyone else a live
+        // card is assigned to. Over the public link, not those kept out of sight, nor a card that names one. The cards
+        // are drawn in one views() read, whatever the number of instances.
+        const only = url.searchParams.get("instance");
+        const names = (only ? [only] : [...new Set([...Object.keys(ctx.fleetConfig?.instances ?? {}), ...board.liveAssignees()])]).filter((n) => !hiddenName(n));
+        const works = names.map((name) => ({ name, w: board.myWork(name) }));
+        const all = new Map<string, Parameters<typeof board.views>[0][number]>();
+        for (const { w } of works) for (const c of [...w.doing, ...w.blocked, ...w.review, ...w.ready, ...w.waiting.map((x) => x.card), ...w.mains.map((x) => x.card)]) if (!hidden(c)) all.set(c.uuid, c);
+        const viewOf = new Map(board.views([...all.values()], scope).map((v) => [v.uuid, v]));
+        const drawn = (cards: Array<{ uuid: string }>) => cards.flatMap((c) => (viewOf.has(c.uuid) ? [viewOf.get(c.uuid)!] : []));
+        const codes = (cards: Array<{ card: { uuid: string; code: string } }>) => cards.filter((x) => all.has(x.card.uuid)).map((x) => x.card.code);
+        json(res, 200, { instances: works.map(({ name, w }) => ({
+          name,
+          doing: drawn(w.doing), blocked: drawn(w.blocked), review: drawn(w.review), ready: drawn(w.ready),
+          waiting: drawn(w.waiting.map((x) => x.card)), mains: drawn(w.mains.map((x) => x.card)),
+          sentBack: codes(w.sentBack), newComments: codes(w.newComments),
+        })) });
         return true;
       }
       if (method === "GET" && path === "/ui/tasks/search") {
