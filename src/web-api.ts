@@ -202,6 +202,37 @@ const safeInstanceSegment = (name: string): boolean => /^[^\\/\x00]+$/.test(name
 const streamGuests = new WeakMap<ServerResponse, GuestRequest>();
 
 /**
+ * The task board's rule over the public link: an instance kept out of sight (cross_instance_visibility: hidden) is not
+ * shown, nor a card that names one as its assignee, creator or dispatcher. Off the link nothing is hidden. Read when
+ * asked: the fleet's config as it is now.
+ */
+function boardHiding(ctx: WebApiContext, gateway: boolean) {
+  const fleet = ctx.fleetConfig as Parameters<typeof crossInstanceVisibility>[0];
+  const hiddenName = (n: unknown) => gateway && typeof n === "string" && !!n && !!ctx.fleetConfig?.instances?.[n] && crossInstanceVisibility(fleet, n) === "hidden";
+  const hidden = (c: { assignee: string | null; createdBy: string; dispatcher: { name: string } | null }) => [c.assignee, c.createdBy, c.dispatcher?.name].some(hiddenName);
+  return { hiddenName, hidden };
+}
+
+/**
+ * Needs you as the public link may see it (#2306 review): a task item whose card the board hides there — or a card
+ * the board no longer has — is left out, with its title and question; everything else as listed. Off the link, as is.
+ * The link reads Needs you by /ui/poll only: its page has no stream (/ui/events answers it 404).
+ */
+function visibleNeeds(ctx: WebApiContext, gateway: boolean, items: unknown[]): unknown[] {
+  if (!gateway) return items;
+  const board = ctx.scheduler?.db.board;
+  const { hidden } = boardHiding(ctx, true);
+  return items.filter((i) => {
+    const item = i as { type?: unknown; card?: { code?: unknown } };
+    if (item.type !== "task") return true;
+    const code = item.card?.code;
+    if (!board || typeof code !== "string") return false;
+    try { const card = board.findCard(code); return !!card && !hidden(card); } catch { return false; }
+  });
+}
+
+
+/**
  * #1920 §5.2: one event for the guests' streams only, each as projected for it — a message that has just become what
  * its channel saw (an admin's page already has it, unchanged).
  */
@@ -1378,8 +1409,9 @@ export function handleWebRequest(
       reactions: history ? history.reactionStates() : [],
       // And the fleet prompts open on the dashboard (C4): prompt events are stream-only too.
       prompts: ctx.listWebPrompts?.() ?? [],
-      // #1386: "Needs you" rides the passive channels only — no endpoint of its own to poll.
-      needs: ctx.needsYouItems?.() ?? [],
+      // #1386: "Needs you" rides the passive channels only — no endpoint of its own to poll. Over the public link,
+      // without the task board's hidden cards (#2306 review).
+      needs: visibleNeeds(ctx, !!gatewayRequestContext(req), ctx.needsYouItems?.() ?? []),
       // #1577: the newest message this answer accounts for — after a restart, the last restored one until this process
       // records its own (`<boot>-0` would be after(0): the whole restored history again on every poll).
       cursor: history ? history.pollCursor() : null,
@@ -2199,9 +2231,7 @@ export function handleWebRequest(
     const gateway = gatewayRequestContext(req);
     if (gateway && method !== "GET") { json(res, 403, { error: "task_board_not_over_public_link", code: "forbidden", key: "not_over_public_link" }); return true; }
     // …nor shows the cards of instances kept out of sight (cross_instance_visibility: hidden).
-    const fleet = ctx.fleetConfig as Parameters<typeof crossInstanceVisibility>[0];
-    const hiddenName = (n: unknown) => !!gateway && typeof n === "string" && !!n && !!ctx.fleetConfig?.instances?.[n] && crossInstanceVisibility(fleet, n) === "hidden";
-    const hidden = (c: { assignee: string | null; createdBy: string; dispatcher: { name: string } | null }) => [c.assignee, c.createdBy, c.dispatcher?.name].some(hiddenName);
+    const { hiddenName, hidden } = boardHiding(ctx, !!gateway);
     // #2303 review: what a visible card shows of the cards around it follows the same rule — its children, its main
     // task (a search hit's too) — and so do the words and the history a hidden instance left on it.
     // …and a hidden instance's words on a visible card are not counted, named or found there (#2304 review).

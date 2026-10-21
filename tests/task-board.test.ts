@@ -875,6 +875,11 @@ describe("15. whom a write wakes (step 2)", () => {
     expect(h.take()).toEqual([]);
     const wake = { instance: "lead", uuid: card.uuid, code: card.code, title: card.title, parent: null, reasons: ["to_confirm"] as WakeReason[], by: { to_confirm: "dev-a" }, texts: {} };
     expect(board.wakeHolds(wake)?.reasons).toEqual(["to_confirm"]);
+    board.updateCard(ANN, card.code, { needsReview: false });
+    expect(board.waitingForPerson().map((w) => w.card.code)).toEqual([own.code]);   // not the person's to confirm any more
+    expect(board.wakeHolds(wake)).toBeNull();                   // #2341 review: its confirmation switched off meanwhile
+    board.updateCard(ANN, card.code, { needsReview: true });
+    expect(board.wakeHolds(wake)?.reasons).toEqual(["to_confirm"]);
     board.moveCard(ANN, card.code, "done");
     expect(board.wakeHolds(wake)).toBeNull();                   // confirmed meanwhile: nothing to relay
   });
