@@ -10564,6 +10564,7 @@ export class Daemon extends EventEmitter {
       } catch { /* fallback to empty */ }
       instructions = buildFleetInstructions({
         instanceName: this.name,
+        taskBoard: !dashboardOff.includes("task_board"),
         workingDirectory: this.config.working_directory,
         runtimeIdentity: this.runtimeIdentity,
         displayName: this.config.display_name,
@@ -10577,6 +10578,7 @@ export class Daemon extends EventEmitter {
     } else {
       instructions = buildFleetInstructions({
         instanceName: this.name,
+        taskBoard: !dashboardOff.includes("task_board"),
         workingDirectory: this.config.working_directory,
         runtimeIdentity: this.runtimeIdentity,
         displayName: this.config.display_name,

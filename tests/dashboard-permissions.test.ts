@@ -97,7 +97,7 @@ describe("enforced at the fleet's sinks, as configured now", () => {
     expect(check("ipc-outbound", "dev", "create_instance").message).toMatch(/create_instance is not available/);   // the profile's
     fm.fleetConfig.instances.dev.dashboard = { task_board: true };                                              // read at each call
     expect(check("ipc-outbound", "dev", "task").allowed).toBe(true);
-  });
+  }, 30_000);                                       // the first import of the fleet is slow under load
 
   it("the agent endpoint (`agend task …`): refused before the board is touched", async () => {
     const handled = vi.fn(async () => ({ ok: true }));
@@ -126,8 +126,9 @@ describe("the agent's side: its tool menu from its next start; the daemon keeps 
     const source = (await import("node:fs")).readFileSync(new URL("../src/daemon.ts", import.meta.url), "utf8");
     expect(source).toMatch(/mcpEnv\.AGEND_DASHBOARD_OFF = dashboardOff\.join\(","\)/);
     const mcp = (await import("node:fs")).readFileSync(new URL("../src/channel/mcp-server.ts", import.meta.url), "utf8");
-    expect(mcp).toMatch(/withoutFeatures\(TOOLS\.filter\(t => allowedTools\.has\(t\.name\)\), dashboardOff\)/);
-  });
+    expect(mcp).toMatch(/withoutFeatures\(TOOLS\.filter\(t => allowedTools\.has\(t\.name\)\), dashboardOffNow\(\)\)/);
+    expect(mcp).toMatch(/watchDashboardOff\(featureDataDir, menuInstance, spawnDashboardOff, \(\) => \{ void mcp\.sendToolListChanged\(\)/);
+  }, 30_000);
 });
 
 describe("Settings: one feature at a time; switching off applies directly, switching on is confirmed", () => {

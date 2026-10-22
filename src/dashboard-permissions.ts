@@ -79,3 +79,32 @@ export function dashboardAccessProblem(value: unknown): string | null {
   }
   return null;
 }
+
+/** The features switched off in a fleet config for `name`: `defaults.dashboard` merged with the instance's own. */
+export function dashboardFeaturesOffIn(fleet: unknown, name: string): DashboardFeature[] {
+  const f = fleet && typeof fleet === "object" ? fleet as { defaults?: { dashboard?: unknown }; instances?: Record<string, { dashboard?: unknown } | undefined> } : {};
+  const own = (v: unknown): Record<string, unknown> => (v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {});
+  return dashboardFeaturesOff({ ...own(f.defaults?.dashboard), ...own(f.instances?.[name]?.dashboard) });
+}
+
+/**
+ * (a) An agent without the task board is not told to use it: the built-in workflow's task board section ("## Progress
+ * Tracking", up to the next section) leaves its instructions, and a CLI agent's `agend-agent task …` lines theirs.
+ */
+export function withoutTaskBoardGuidance(workflow: string): string {
+  return workflow.replace(/^## Progress Tracking\b[\s\S]*?(?=^## |(?![\s\S]))/m, "");
+}
+export function withoutTaskCommands(cli: string): string {
+  return cli.split("\n").filter((line) => !/^\s*agend-agent task\b/.test(line)).join("\n");
+}
+
+/** (b) What an agent is told when the person switches the task board on for it (its tool list follows at once). */
+export const TASK_BOARD_ON_NOTICE = "[Task board] The person switched the task board on for you: the `task` tool is in your tool list now. "
+  + "Start with `task mine` (your work on the board); open a main task for multi-step work you are asked for, split it into sub tasks, "
+  + "keep its state current, and finish a main task by moving it to review — only the person confirms it. "
+  + "A later [Task board] notice is news on your cards: act on it with the `task` tool.";
+
+/** (b) The task board went from switched off to allowed between two resolved configs of one instance. */
+export function taskBoardSwitchedOn(before: unknown, after: unknown): boolean {
+  return dashboardFeaturesOff(before).includes("task_board") && !dashboardFeaturesOff(after).includes("task_board");
+}

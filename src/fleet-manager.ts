@@ -291,7 +291,8 @@ import { CompactWatch, launchIdentity } from "./compact-watch.js";
 import { agyLegacyAgentsFile, danglingSymlink, migrateAgyAgentsFile } from "./backend/antigravity.js";
 import { claudeConfigDirFor, claudeProjectKey } from "./backend/claude-code.js";
 import { sharedRolloutIndex } from "./rollout-index.js";
-import { dashboardRefusal } from "./dashboard-permissions.js";
+import { TASK_BOARD_ON_NOTICE, dashboardRefusal, taskBoardSwitchedOn } from "./dashboard-permissions.js";
+import { settleTaskBoardDefault } from "./task-board-default.js";
 import {
   mayUseTool,
   resolveToolSet,
@@ -7187,6 +7188,14 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
 
     this.rotateFleetLogs();
 
+    // The task board's default, once per home (task-board-default.ts): kept where it was used, off where it never was.
+    try {
+      const decided = settleTaskBoardDefault({ dataDir: this.dataDir, configPath });
+      if (decided === "off") this.logger.info("Task board: never used here, so it is off by default (defaults.dashboard.task_board: false) — switch it on in Settings → General → Defaults");
+      else if (decided === "used") this.logger.info("Task board: already in use here, so it stays on");
+    } catch (err) {
+      this.logger.warn({ err }, "Task board: could not settle its default; it stays as fleet.yaml says");
+    }
     const fleet = this.loadConfig(configPath);
     this.slimFleetConfigAtStartup();
     this.logConfigWarningsAtStartup();
@@ -20266,6 +20275,10 @@ Plus the operational skills (fleet-health, instance-lifecycle, scheduling, sessi
         const daemon = this.daemons.get(name)!;
         const runtimeConfig = daemon.getConfigSnapshot?.() ?? oldConfig.instances[name];
         const change = classifyInstanceChange(runtimeConfig, config);
+        // (b) The person switched its task board on: tell it (its tool list shows the `task` tool at once).
+        if (taskBoardSwitchedOn(runtimeConfig.dashboard, config.dashboard)) {
+          this.admitTaskBoardNotice(name, TASK_BOARD_ON_NOTICE, `task-board-on:${name}:${Date.now()}`);
+        }
         if (change === "restart") {
           this.logger.info({ name }, "Instance config changed — restarting");
           observe?.(name, "restart", "running");
