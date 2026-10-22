@@ -279,6 +279,7 @@ const mcp = new Server(
 // --- Tool definitions (see mcp-tools.ts) ---
 
 import { resolveToolSetFromEnv, toolsFor, TOOL_PROFILES } from "../tool-permissions.js";
+import { featuresOffFromEnv, withoutFeatures } from "../dashboard-permissions.js";
 export { TOOLS } from "./mcp-tools.js";
 
 const requestedToolSet = process.env.AGEND_TOOL_SET;
@@ -293,7 +294,9 @@ if (requestedToolSet && resolvedToolSet !== requestedToolSet) {
 const allowedTools = toolsFor(resolvedToolSet);
 // The IPC socket identifies the owning home even when the backend did not inherit AGEND_HOME.
 const featureDataDir = SOCKET_PATH ? dirname(dirname(dirname(SOCKET_PATH))) : getAgendHome();
-const currentTools = () => toolsWithCanvasWorker(readCanvasWorkerEnabled(featureDataDir), TOOLS.filter(t => allowedTools.has(t.name)));
+// The dashboard features the person switched off for this instance leave the menu too (the fleet refuses them anyway).
+const dashboardOff = featuresOffFromEnv(process.env.AGEND_DASHBOARD_OFF);
+const currentTools = () => toolsWithCanvasWorker(readCanvasWorkerEnabled(featureDataDir), withoutFeatures(TOOLS.filter(t => allowedTools.has(t.name)), dashboardOff));
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: currentTools() }));
 

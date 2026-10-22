@@ -291,6 +291,7 @@ import { CompactWatch, launchIdentity } from "./compact-watch.js";
 import { agyLegacyAgentsFile, danglingSymlink, migrateAgyAgentsFile } from "./backend/antigravity.js";
 import { claudeConfigDirFor, claudeProjectKey } from "./backend/claude-code.js";
 import { sharedRolloutIndex } from "./rollout-index.js";
+import { dashboardRefusal } from "./dashboard-permissions.js";
 import {
   mayUseTool,
   resolveToolSet,
@@ -9873,6 +9874,12 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
     if (!allowed) {
       this.logger.warn({ sink, instance: instanceName, profile, tool, enforced: true }, "tool-permissions: refused");
       return { allowed: false, message: toolRefusedMessage(profile, tool) };
+    }
+    // The person's dashboard switches (dashboard-permissions.ts), on top of the profile, as configured now.
+    const switchedOff = dashboardRefusal(this.fleetConfig?.instances[instanceName]?.dashboard, tool);
+    if (switchedOff) {
+      this.logger.warn({ sink, instance: instanceName, profile, tool, enforced: true, dashboard: true }, "tool-permissions: refused");
+      return { allowed: false, message: switchedOff };
     }
     this.logger.debug({ sink, instance: instanceName, profile, tool, enforced: true }, "tool-permissions: allowed");
     return { allowed: true, message: "" };
