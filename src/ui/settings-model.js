@@ -15,12 +15,15 @@ export const LOG_LEVELS = ["trace", "debug", "info", "warn", "error"];
  */
 export const TOOL_SETS = ["worker", "coordinator", "standard", "minimal", "full"];
 /**
- * The profile an agent runs under while it sets none (resolveToolSet): the fleet default's, else `general` for a
- * General (`general_topic`, or the instance named general), else `worker` — never `full`, which the page used to show.
+ * The profile an agent runs under while it sets none (resolveToolSet, on the config as loaded: the defaults merged
+ * under the agent's own): the fleet default's, else `general` for a General — its own `general_topic`, else the
+ * default's (#2407 review: `defaults.general_topic: true` makes every agent without its own a General), or the instance
+ * named general — else `worker`; never `full`, which the page used to show.
  */
 export function toolSetDefault(defaults, inst, name = "") {
   if (TOOL_SETS.includes(defaults && defaults.tool_set)) return defaults.tool_set;
-  return (inst && inst.general_topic === true) || name === "general" ? "general" : "worker";
+  const general = hasOwn(inst, "general_topic") ? inst.general_topic === true : !!defaults && defaults.general_topic === true;
+  return general || name === "general" ? "general" : "worker";
 }
 export const TOOL_PROGRESS = ["off", "standard", "verbose"];
 export const AGENT_MODES = ["mcp", "cli"];

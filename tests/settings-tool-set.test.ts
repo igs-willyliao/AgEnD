@@ -4,7 +4,13 @@
  * General, else worker), never the "full" the page used to show. General → Defaults has "not set" as a choice of its
  * own, and choosing it removes the default instead of writing one.
  */
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import yaml from "js-yaml";
+import { DEFAULT_INSTANCE_CONFIG, loadFleetConfig } from "../src/config.js";
+import type { FleetConfig } from "../src/types.js";
 import { EventEmitter } from "node:events";
 import { handleSettingsRequest } from "../src/settings-api.js";
 import { TOOL_PROFILES, resolveToolSet } from "../src/tool-permissions.js";
@@ -36,6 +42,23 @@ describe("unset: the profile in effect, as the fleet resolves it", () => {
     expect(toolSetDefault(defaults, inst, name)).toBe(resolveToolSet(merged, name));
   });
 
+  // #2407 review: the role as loaded — the defaults merged under the agent's own — not the agent's raw keys alone.
+  const dirs: string[] = [];
+  afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+  const loaded: Array<[string, string]> = [
+    ["a role inherited from the defaults", "defaults:\n  general_topic: true\ninstances:\n  dev:\n    working_directory: <DIR>\n"],
+    ["control: a default profile", "defaults:\n  general_topic: true\n  tool_set: coordinator\ninstances:\n  dev:\n    working_directory: <DIR>\n"],
+    ["control: the agent's own false role", "defaults:\n  general_topic: true\ninstances:\n  dev:\n    working_directory: <DIR>\n    general_topic: false\n"],
+    ["control: the agent's own General role", "defaults: {}\ninstances:\n  dev:\n    working_directory: <DIR>\n    general_topic: true\n"],
+  ];
+  it.each(loaded)("as fleet.yaml loads: %s", (_label, text) => {
+    const dir = mkdtempSync(join(tmpdir(), "tool-set-")); dirs.push(dir);
+    const file = join(dir, "fleet.yaml");
+    writeFileSync(file, text.replaceAll("<DIR>", dir));
+    const raw = yaml.load(text) as { defaults: Record<string, unknown>; instances: { dev: Record<string, unknown> } };
+    expect(toolSetDefault(raw.defaults, raw.instances.dev, "dev")).toBe(resolveToolSet(loadFleetConfig(file).instances.dev, "dev"));
+  });
+
   it("the agent form: inheriting shows that profile; the value it would write is always one a person may set", () => {
     const worker = agentForm({ working_directory: "/w" }, {}, "dev");
     expect([worker.inherit.tool_set, worker.tool_set]).toEqual([true, "worker"]);
@@ -52,7 +75,7 @@ describe("unset: the profile in effect, as the fleet resolves it", () => {
 
 describe("General → Defaults: not set is a choice, and choosing it removes the default", () => {
   it("the confirmation names the change to the default, and the default goes", () => {
-    const config = { defaults: { tool_set: "full" }, channels: [], instances: { dev: { working_directory: "/w" } } };
+    const config: FleetConfig = { defaults: { tool_set: "full" }, channels: [], instances: { dev: { ...DEFAULT_INSTANCE_CONFIG, working_directory: "/w" } } };
     const { diff } = prepareSettingsEffect("PUT", "/api/settings/fleet/defaults", { tool_set: null }, { config, classic: {} });
     expect(diff?.summary.some((l) => /tool\\?_set/.test(l) && /full/.test(l))).toBe(true);
     expect(validateFleetConfig({ defaults: { tool_set: null }, instances: {} }).errors.map((e) => e.path)).toEqual(["defaults.tool_set"]);
