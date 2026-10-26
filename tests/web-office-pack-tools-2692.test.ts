@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { LayoutOverrides } from "../src/ui/fleet-office-pack.js";
 
 vi.mock("node:child_process", async importOriginal => {
   const real = await importOriginal<typeof import("node:child_process")>();
@@ -31,7 +32,7 @@ const { OfficePackTools, OfficePackBatchLimiter, OfficePackUploads, overrideConf
 const { readPackSources, encodePackBatch, sendPackBatchInParts, sendPackSources } = await import("../src/web-office-pack-read.js");
 const { OfficeSkinStore, checkSkinUpload, PREVIOUS_FILE } = await import("../src/web-office-skins.js");
 const { OfficeStore } = await import("../src/web-office-store.js");
-const { checkSkinPack } = await import("../src/ui/fleet-office-pack.js");
+const { checkSkinPack, fitSeatFor } = await import("../src/ui/fleet-office-pack.js");
 const { DASHBOARD_FEATURE_TOOLS, OFF_UNLESS_ON, SEPARATE_FEATURE_KEYS, dashboardFeaturesOff, dashboardFeaturesOffIn, dashboardRefusal, normalizeOfficeStorage, withoutFeatures } = await import("../src/dashboard-permissions.js");
 const { validateFleetConfig } = await import("../src/config-validator.js");
 const { TOOLS } = await import("../src/channel/mcp-tools.js");
@@ -310,7 +311,7 @@ describe("the offices' layout overrides against the new pack", () => {
   // upload breaking one used to drop the office's whole layout.
   describe("seat reservations (seatFor)", () => {
     const RES = { pack: "snug", door: [600, 710], seats: { lounge: [[780, 280]] },
-      seatFor: { desks: { 0: { for: ["alpha"], lend: false }, 1: { for: ["beta"], lend: true } }, lounge: { 0: { for: ["gamma"], lend: false } } } };
+      seatFor: { desks: { 0: { for: ["alpha"], lend: false }, 1: { for: ["beta"], lend: true } }, lounge: { 0: { for: ["gamma"], lend: false } } } } satisfies LayoutOverrides;   // tuples, as fitSeatFor takes them
     /** v1 without its lounge (everyone's default the desks). */
     const NO_LOUNGE = () => { const m: any = MANIFEST(); delete m.areas.lounge; m.stateZones = { working: "desks", default: "desks" }; return { manifest: m, files: PICTURES(5) }; };
     const setUp = async (overrides: unknown) => {
@@ -359,6 +360,57 @@ describe("the offices' layout overrides against the new pack", () => {
       // Back to the version with the lounge: the reservations left fit it, so nothing else is dropped.
       expect(t.handle("alpha", "office_pack_restore", { id: "snug" })).toMatchObject({ applied: { restored: "snug" } });
       expect(resOf(offices)).toEqual({ pack: "snug", door: [600, 710], seatFor: { desks: RES.seatFor.desks } });
+    });
+
+    // #2700: the reservations are part of the check on every path — upload (replace), restore, check — and in the notice.
+    it("a replace that keeps every reserved seat goes through with the offices untouched (no write, nothing dropped)", async () => {
+      const { t, offices, notices } = await setUp(RES);
+      const rev = offices.rev();
+      const r = await send(t, "office_pack_upload", [SOURCE({ desks: 3, seed: 6 })]) as any;
+      expect(r.applied[0]).not.toHaveProperty("dropped_overrides");
+      expect([offices.rev(), resOf(offices)]).toEqual([rev, RES]);
+      expect(notices.at(-1)!.text).not.toContain("dropping");
+    });
+
+    it("the notice names each reservation dropped: held for a yes, approved, applied at once", async () => {
+      const { t, notices } = await setUp(RES);
+      t.setApproval("approve", "admin");
+      const r = await send(t, "office_pack_upload", [SOURCE({ desks: 1, seed: 7 })], { drop_invalid_overrides: true }) as any;
+      expect(r.pending.drops.map((d: any) => d.entry)).toEqual(["seatFor.desks.1"]);
+      expect(notices.at(-1)!.text).toContain("and dropping 1 layout override(s) that no longer fit — Res: seatFor.desks.1");
+      expect(t.decide(r.pending.id, "approve", "admin")).toMatchObject({ ok: true, text: expect.stringContaining("— Res: seatFor.desks.1") });
+      t.setApproval("apply", "admin");
+      await send(t, "office_pack_upload", [NO_LOUNGE()], { drop_invalid_overrides: true });
+      expect(notices.at(-1)!.text).toContain("and dropping 2 layout override(s) that no longer fit — Res: seats.lounge, seatFor.lounge.0");
+    });
+
+    it("a restore to a version without a reserved seat: refused naming it; with drop_invalid_overrides, only it goes, listed", async () => {
+      const x = tools({ approval: "apply" });
+      await send(x.t, "office_pack_upload", [SOURCE({ desks: 1 })]);
+      await send(x.t, "office_pack_upload", [SOURCE({ desks: 2, seed: 8 })]);                   // the one-desk version is the kept previous
+      putOffices(x.offices, [{ id: "res", name: "Res", skin: "snug", members: [], overrides: RES }] as never);
+      const refused = x.t.handle("alpha", "office_pack_restore", { id: "snug" }) as any;
+      expect(refused).toMatchObject({ error: "overrides_invalid", message: expect.stringMatching(/office "Res" \(res\): seatFor\.desks\.1: a seat the area has \(it has 1\)/) });
+      expect(refused.conflicts.map((c: any) => c.entry)).toEqual(["seatFor.desks.1"]);
+      expect(resOf(x.offices)).toEqual(RES);
+      expect(x.t.handle("alpha", "office_pack_restore", { id: "snug", drop_invalid_overrides: true })).toMatchObject({ applied: { restored: "snug", dropped_overrides: [{ office: "res", entry: "seatFor.desks.1" }] } });
+      expect(resOf(x.offices)).toEqual({ ...RES, seatFor: { desks: { 0: RES.seatFor.desks[0] }, lounge: RES.seatFor.lounge } });
+      expect(x.notices.at(-1)!.text).toContain("— Res: seatFor.desks.1");
+      expect(x.offices.replace(x.offices.list().offices, x.offices.rev())).toMatchObject({ ok: true });
+    });
+
+    it("the reservations named are exactly the ones the page's fitSeatFor would drop on read (one rule on both sides)", () => {
+      const packs = [SOURCE({ desks: 1 }), SOURCE({ desks: 3, seed: 1 }), NO_LOUNGE()];
+      for (const src of packs) {
+        const pack = checkSkinPack(src.manifest) as any;
+        expect(pack.ok).toBe(true);
+        const named = overrideConflicts([{ id: "res", name: "Res", skin: "snug", members: [], overrides: RES }] as never, pack.pack)
+          .map((c: any) => c.entry).filter((e: string) => e.startsWith("seatFor."));
+        const fit = fitSeatFor(pack.pack, RES) as any;
+        const all = Object.entries(RES.seatFor).flatMap(([a, slots]) => Object.keys(slots).map(s => `seatFor.${a}.${s}`));
+        const kept = Object.entries(fit.seatFor ?? {}).flatMap(([a, slots]) => Object.keys(slots as object).map(s => `seatFor.${a}.${s}`));
+        expect(named).toEqual(all.filter(e => !kept.includes(e)));
+      }
     });
 
     it("never the whole layout: a conflict no single entry explains is refused even with drop_invalid_overrides", () => {
