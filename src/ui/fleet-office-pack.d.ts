@@ -6,8 +6,9 @@ export interface PackPoint { x: number; y: number }
 /** #2691: a seat reserved for `for` (lent while they are all elsewhere when `lend`); a plain seat has neither. */
 export interface PackSeat extends PackPoint { for?: string[]; lend?: boolean }
 export interface PackArea { name: string; rect: { x: number; y: number; w: number; h: number }; seats: PackSeat[] }
-/** `label` (#2574): its name tag, or null. */
-export interface PackFurniture { id: string; sprite: PackStrip; x: number; y: number; depth: number | "y"; activeWhen: string[] | null; activeSprite: PackStrip | null; label: string | null }
+/** `label` (#2574): its name tag, or null. `activeOn`/`hides` (#2698): when it turns active, and whether it hides its people then. */
+export interface PackFurniture { id: string; sprite: PackStrip; x: number; y: number; depth: number | "y"; activeWhen: string[] | null; activeSprite: PackStrip | null;
+  activeFor?: string[] | null; loop?: boolean; activeOn?: "state" | "seated"; hides?: boolean; label: string | null }
 export interface CheckedPack {
   format: 1; id: string; scale: number; background?: string; foreground?: string; matte?: string;
   areas: Record<string, PackArea>; stateZones: Record<string, string> | null; door: PackPoint;

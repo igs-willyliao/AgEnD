@@ -339,6 +339,10 @@ A pack may add a `foreground` (a 16:9 PNG over the whole scene, zones packs only
 and items in the air, below name tags, bubbles and "+N" — door frames, pillars, table fronts that hide whoever walks
 behind them. A furniture item's `depth` may be `"y"`: drawn among the people by base y (whoever stands lower is in
 front). Numeric depths keep their meaning (under 1000 under the people, 1000 and up over them).
+An item with `activeWhen` may wait for its person (#2698): `"activeOn": "seated"` turns it active only once one of its
+`activeFor` people in that state has arrived at their seat, and back as they walk off (default `"state"`: as the state
+changes); `"hides": true` (needs `activeFor`) stops drawing those people while it is active (walking, they are drawn),
+puts their name tags (one row at the item's tag point) and bubbles on it, and makes hovering or clicking it hit them.
 A pack may set `"straight": true` (#2634): each diagonal leg of a walk becomes an L (across, then up or down), so the
 three walking strips always fit; lay its graph out with horizontal and vertical edges and the corners land on the aisles.
 

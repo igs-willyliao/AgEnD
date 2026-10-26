@@ -42,7 +42,7 @@
 //                                                     always fit (graph edges laid out across and up/down put the
 //                                                     corners on the aisles); default false
 //     "furniture": [ { "id": "rack", "sprite": STRIP, "x": 1020, "y": 140, "depth": 2,
-//                      "activeWhen": "crashed", "activeSprite": STRIP, "activeFor": "atlas", "loop": true, "label": "Rack",
+//                      "activeWhen": "crashed", "activeSprite": STRIP, "activeFor": "atlas", "loop": true, "activeOn": "seated", "hides": true, "label": "Rack",
 //                      "night": { "sprite": STRIP, "x": 300, "y": 420 },
 //                      "walk": { "walk": STRIP, "walkDown": STRIP, "walkUp": STRIP, "walkSide": STRIP } } ],
 //                                                     "label" (#2574): a name tag under it, like a person's
@@ -62,7 +62,14 @@
 //                                                     strip (or `activeSprite`); otherwise it holds the first frame —
 //                                                     or, with "loop": true (#2570), plays its strip all along.
 //                                                     "activeFor" (an instance's name, or a list): only their state
-//                                                     counts, not anyone's (a room several people take turns in)
+//                                                     counts, not anyone's (a room several people take turns in).
+//                                                     "activeOn" (#2698): "state" (the default) turns it active as the
+//                                                     state changes; "seated" only once one of them in that state is
+//                                                     at the seat zones gave them, not walking — back as they walk off.
+//                                                     "hides": true (#2698, only with activeFor): while active, the
+//                                                     people it is active for are not drawn (walking, they always
+//                                                     are); their name tags and bubbles are drawn on it, in one row at
+//                                                     its tag point, and hovering or clicking it hits them
 //     "characters": { "default": { "working": STRIP, "idle": STRIP, "paused": STRIP, "needs": STRIP, "walk": STRIP,
 //                                  "walkDown": STRIP, "walkUp": STRIP, "walkSide": STRIP },
 //                     "fox": { … } },                 "default" with at least "idle" is required; a missing pose is idle.
@@ -288,17 +295,22 @@ export function checkSkinPack(x, { kept = false } = {}) {
     const fids = new Set();
     const furniture = list(x.furniture ?? [], LIMIT.furniture, "furniture").map((f, i) => {
       const at = `furniture[${i}]`;
-      obj(f, at); keys(f, ["id", "sprite", "x", "y", "depth", "activeWhen", "activeSprite", "activeFor", "loop", "label", "night", "walk"], at);
+      obj(f, at); keys(f, ["id", "sprite", "x", "y", "depth", "activeWhen", "activeSprite", "activeFor", "loop", "activeOn", "hides", "label", "night", "walk"], at);
       if (!nameOk(f.id) || fids.has(f.id)) throw new Refused(`${at}.id`, "a new name of letters, digits, _ or - (not an inherited one)");
       fids.add(f.id);
       if (f.activeSprite !== undefined && f.activeWhen === undefined) throw new Refused(`${at}.activeSprite`, "only with activeWhen");
       if (f.activeFor !== undefined && f.activeWhen === undefined) throw new Refused(`${at}.activeFor`, "only with activeWhen");
       if (f.loop !== undefined && typeof f.loop !== "boolean") throw new Refused(`${at}.loop`, "true or false");
+      if (f.activeOn !== undefined && f.activeOn !== "state" && f.activeOn !== "seated") throw new Refused(`${at}.activeOn`, '"state" or "seated"');
+      if (f.activeOn !== undefined && f.activeWhen === undefined) throw new Refused(`${at}.activeOn`, "only with activeWhen");
+      if (f.hides !== undefined && typeof f.hides !== "boolean") throw new Refused(`${at}.hides`, "true or false");
+      if (f.hides !== undefined && f.activeFor === undefined) throw new Refused(`${at}.hides`, "only with activeFor");
       if (f.label !== undefined && (typeof f.label !== "string" || !f.label.trim() || [...f.label].length > LIMIT.line || /[\u0000-\u001f\u007f]/.test(f.label))) throw new Refused(`${at}.label`, `1–${LIMIT.line} characters`);
       return { id: f.id, sprite: checkStrip(f.sprite, `${at}.sprite`, scale), x: num(f.x, 0, LOGICAL.w, `${at}.x`), y: num(f.y, 0, LOGICAL.h, `${at}.y`),
         depth: f.depth === "y" ? "y" : depth(f.depth ?? 0, `${at}.depth`), activeWhen: f.activeWhen === undefined ? null : states(f.activeWhen, `${at}.activeWhen`),
         activeSprite: f.activeSprite === undefined ? null : checkStrip(f.activeSprite, `${at}.activeSprite`, scale),
-        activeFor: f.activeFor === undefined ? null : names(f.activeFor, `${at}.activeFor`), loop: f.loop === true, label: f.label === undefined ? null : f.label.trim(), night: nightOf(f.night, `${at}.night`, scale),
+        activeFor: f.activeFor === undefined ? null : names(f.activeFor, `${at}.activeFor`), loop: f.loop === true,
+        activeOn: f.activeOn === "seated" ? "seated" : "state", hides: f.hides === true, label: f.label === undefined ? null : f.label.trim(), night: nightOf(f.night, `${at}.night`, scale),
         walk: walkOf(f.walk, `${at}.walk`, scale) };
     }).sort((a, b) => order(a) - order(b));
     const sets = obj(x.characters, "characters");

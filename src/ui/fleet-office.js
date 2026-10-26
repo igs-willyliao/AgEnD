@@ -15,7 +15,8 @@
 //   goes through the same view transform.
 // - Speech bubbles: now and then a short line for its state (typed out; at once with reduced motion) — the page's own
 //   lines or the skin's, never anything an agent said. Furniture can react: an item with `activeWhen` animates while
-//   anyone shown is in that state.
+//   anyone shown is in that state — or (#2698, "activeOn": "seated") once its person sits down; one that "hides" its
+//   people carries their name tags and bubbles while it is active, and hovering it hits them (furnitureAt).
 // - Each occupant is a little pixel person in a pose that loops a few frames: working (typing, the lamp on), idle (tea),
 //   paused or stopped (asleep, a closed sign), needs you / crashed / looks stuck (a hand up, a blinking light).
 // - Traffic: each new message, delegation or report is an item carried from the sender's desk to the receiver's along
@@ -64,13 +65,13 @@ import { hits, needle } from "./fleet-canvas-layout.js";
 import { AUTO_ID, LOBBY, autoLayout, backingScale, coatOf, createFlights, customLayout, deskAt, desksOf, filterOk, lampOf, layoutOk, lightOf, membersOf,
   officePose, officeRooms, signOf, workOn } from "./fleet-office-model.js";
 import { BUILT_IN_SKINS, CHAR_DEPTH, DEFAULT_PAL, bubbleBox, loadCozySkin, loadPackSkin, modeOf, skinFor, tagBox } from "./fleet-office-skin.js";
-import { CALLING, activeFurniture, bubbleAt, bubbleRank, NIGHT, WANDER, createMail, createWalkers, isNight, linesFor, npcKey, personAt, placeBubbles, thinBubbles, walkTargets, zonesLayout } from "./fleet-office-zones.js";
+import { CALLING, activeFurniture, bubbleAt, hiddenBy, bubbleRank, NIGHT, WANDER, createMail, createWalkers, isNight, linesFor, npcKey, personAt, placeBubbles, thinBubbles, walkTargets, zonesLayout } from "./fleet-office-zones.js";
 import { actsOk, createOfficeStore } from "./fleet-office-store.js";
 import { POLL_MS } from "./fleet-traffic.js";
 import { OfficeEditor, officeForSave } from "./fleet-office-editor.js";
 import { LayoutEditor, handlesOf } from "./fleet-office-layout.js";
 import { ShareButton } from "./office-share-dialog.js";
-import { applyOverrides, fitNight, fitSeatFor } from "./fleet-office-pack.js";
+import { applyOverrides, fitNight, fitSeatFor, stripBox } from "./fleet-office-pack.js";
 import { ALL_ID, LOBBY_TILE, OV, createCrossFlights, cropToRooms, fromTile, inTile, labelAt, lobbyNodes, overviewOk, tileAt, tileBox, tileLayout, visibleTiles } from "./fleet-office-overview.js";
 import { centreOn, gestureState, gestures, miniPoint, toScreen, toWorld, wheelFactor, zoomKey, zoomTo } from "./fleet-canvas-view.js";
 import { OK_MAX, OK_MIN, clampPan, desksK, edgeMatte, edgeStrips, fitScene, layerScale, miniBox, miniFrame, openingView, pinchOffice, savedOf, stepK, viewFromSaved,
@@ -203,7 +204,7 @@ function officeScene(office, nodes, skin, zones, deskW, prevSeats, night = false
   return lay ? customLayout({ ...office, layout: lay }, nodes) : autoLayout([{ key: office.id, name: office.name, lobby: !!office.lobby, nodes }], { width: deskW });
 }
 /** What drawPart needs of a scene; its layers are painted on first draw (and again at another resolution). */
-function partOf(L, looks, skin, zones, walkers, flights) {
+export function partOf(L, looks, skin, zones, walkers, flights) {
   const all = L.rooms.flatMap((r) => r.desks);
   const shown = new Set([...looks.values()].map((l) => l.state)), byName = new Map([...looks.values()].filter((l) => l.name).map((l) => [l.name, l.state]));
   return { L, looks, skin, zones, walkers, flights, all, desks: all.filter((d) => d.node), layers: null,
@@ -214,6 +215,43 @@ function partOf(L, looks, skin, zones, walkers, flights) {
  * (Edit layout, #2665: applyOverrides puts it on `night`), else the pack's night x/y, else its (moved) day place.
  */
 export const nightFurniture = (list) => list.map((f) => (f.night ? { ...f, sprite: f.night.sprite, activeSprite: null, x: f.night.x ?? f.x, y: f.night.y ?? f.y, asleep: true } : f));
+/** #2698: where someone is at `t` against their seat: "walking"; "seated" (still, at the seat zones gave them — or no
+ * walker yet: drawn there); "standing" (still elsewhere: a stroll's spot, an act's point, the seat left before a walk). */
+const postureAt = (p, t) => {
+  const seats = new Map(p.all.filter((d) => d.node).map((d) => [d.node.name, d.seat]));
+  return (name) => {
+    const at = p.walkers && p.walkers.at(name, t), s = seats.get(name);
+    if (!at) return "seated";
+    if (at.walking) return "walking";
+    return s && Math.abs(at.x - s.x) < 1 && Math.abs(at.y - s.y) < 1 ? "seated" : "standing";
+  };
+};
+/**
+ * The furniture active at `t` and who is drawn on an item instead of themselves (`hidden`: name → item id). A pack
+ * with no "activeOn": "seated" nor "hides" (#2698): the scene's `active`, as before, and nobody hidden; else worked out
+ * from where everyone is at `t` (their walkers). An item asleep at bedtime (a `night`) hides nobody.
+ */
+export function furnitureAt(p, t) {
+  const pk = p.zones && p.skin && p.skin.pack, list = (pk && pk.furniture) || [];
+  if (!list.some((f) => f.activeOn === "seated" || f.hides)) return { active: p.active || new Set(), hidden: new Map() };
+  const looks = [...p.looks.values()], byName = new Map(looks.filter((l) => l.name).map((l) => [l.name, l.state]));
+  const posture = postureAt(p, t), active = activeFurniture(pk, new Set(looks.map((l) => l.state)), byName, posture);
+  const hidden = hiddenBy(pk, active, byName, posture);
+  if (p.night) for (const [n, id] of [...hidden]) if (list.some((f) => f.id === id && f.night)) hidden.delete(n);
+  return { active, hidden };
+}
+/** #2698: the box an item hiding its people is hit in — its active picture, down to its name tags' row. */
+const hidingBox = (f) => {
+  const b = stripBox(f.activeSprite || f.sprite, f.x, f.y);
+  return { ...b, h: Math.max(b.h, f.y + 17 - b.y) };
+};
+/** #2698: name tags in one row centred on (x, y) — each { look, x } (its centre), TAG_GAP apart. */
+const TAG_GAP = 4;
+export function tagRow(ctx, x, y, looks) {
+  const ws = looks.map((l) => tagBox(ctx, x, y, l.label).w), total = ws.reduce((a, w) => a + w, 0) + TAG_GAP * Math.max(0, ws.length - 1);
+  let left = x - total / 2;
+  return looks.map((look, i) => { const cx = Math.round(left + ws[i] / 2); left += ws[i] + TAG_GAP; return { look, x: cx }; });
+}
 /** #2596: each NPC with a `walk` where its walker is now (`at(key)`): moved there — its tag and depth with it — and, while
  * it walks, `walking` and its `heading` (its walk strip: walkStrip); asleep, or with no walker (not strolling), where it is. */
 export const strollFurniture = (list, at) => list.map((f) => {
@@ -309,7 +347,7 @@ function paintLayers(p, env, ls, tagsOff = false) {
  * hovered (its name tag shows even in a crowd); `tagsOff` (#2554: a tile too small to read them): the name tags show
  * only for the one hovered and the Find box's matches. Whether anything in it is moving (in the air, or someone walking).
  */
-function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer = null) {
+export function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer = null) {
   const sk = p.skin;
   const ls = layerScale(a, p.L.width, p.L.height);
   if (!p.layers || p.layers.ls !== ls || p.layers.tagsOff !== tagsOff) p.layers = paintLayers(p, env, ls, tagsOff);
@@ -326,7 +364,7 @@ function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer
     // Furniture under the people; the people (nearest last) with the furniture whose depth is "y" among them, by base
     // y (a tie: the item first, the person in front); furniture over them; things in the air; the pack's foreground
     // (door frames, pillars, table fronts); then what must stay readable: crowd counts and name tags (bubbles below).
-    const t = ms > 0 ? ms : now();
+    const t = ms > 0 ? ms : now(), live = furnitureAt(p, t);
     const people = p.desks.map((d) => {
       const at = p.walkers.at(d.node.name, t) || { ...d.seat, walking: false };
       if (at.walking) walking = true;
@@ -339,12 +377,13 @@ function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer
       // #2665: by day, each item's night place too (at night the items are there already).
       ...(p.ghosts && !p.night ? nightGhostsOf(sk.pack).map((n) => ({ y: n.y, k: 1, n })) : [])]
       .sort((x, y) => x.y - y.y || x.k - y.k);
-    for (const f of furniture) if (f.depth !== "y" && f.depth < CHAR_DEPTH) sk.drawFurniture(ctx, f, f.asleep || p.active.has(f.id), ms, env);
+    for (const f of furniture) if (f.depth !== "y" && f.depth < CHAR_DEPTH) sk.drawFurniture(ctx, f, f.asleep || live.active.has(f.id), ms, env);
     for (const it of post) if (it.t === 0) sk.drawProp(ctx, it, ms, env);        // a letter on the floor: under the people
     for (const { f, p: q, g, n } of band) {
-      if (f) { sk.drawFurniture(ctx, f, f.asleep || p.active.has(f.id), ms, env); continue; }
+      if (f) { sk.drawFurniture(ctx, f, f.asleep || live.active.has(f.id), ms, env); continue; }
       if (n) { ctx.save(); ctx.globalAlpha = GHOST_ALPHA; sk.drawFurniture(ctx, n, true, 0, env); ctx.restore(); continue; }
       if (g) { ctx.save(); ctx.globalAlpha = GHOST_ALPHA; sk.drawCharacter(ctx, { x: g.x - 44, y: g.y - 53, w: 88, h: 53, seat: g }, g.look, 0, env); ctx.restore(); continue; }
+      if (live.hidden.has(q.look.name)) continue;                          // #2698: drawn as the item (never while walking)
       const box = { ...q.d, x: q.at.x - 44, y: q.at.y - 53, w: 88, h: 53, seat: { x: q.at.x, y: q.at.y } };
       // An agent's own pose (office_set, #2578) while its act lasts and nothing calls it; walking is walking.
       const posed = actPosed(p, q.look);
@@ -352,7 +391,7 @@ function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer
       sk.drawCharacter(ctx, box, look, ms, env);
       if (!q.at.walking) speakers.push({ look: q.look, ...speakerAt(sk, look, q.at), area: q.d.area });
     }
-    for (const f of furniture) if (f.depth !== "y" && f.depth >= CHAR_DEPTH) sk.drawFurniture(ctx, f, f.asleep || p.active.has(f.id), ms, env);
+    for (const f of furniture) if (f.depth !== "y" && f.depth >= CHAR_DEPTH) sk.drawFurniture(ctx, f, f.asleep || live.active.has(f.id), ms, env);
     for (const it of up) sk.drawProp(ctx, it, ms, env);
     for (const it of post) if (it.t > 0) sk.drawProp(ctx, it, ms, env);
     if (sk.drawForeground) sk.drawForeground(ctx, p.L, env);
@@ -360,13 +399,38 @@ function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer
     for (const [ar, n] of p.L.crowd || []) if (p.L.areas[ar] && sk.drawCrowd) sk.drawCrowd(ctx, p.L.areas[ar], n, env);
     // In an area over capacity the name tags show on hover or focus only (#2513: a crowd's tags covered each other).
     const over = p.L.over || new Set();
+    const tagged = (q) => !((tagsOff || over.has(q.d.area)) && q.d.key !== hot && !q.look.match);
     for (const q of people) {
-      if ((tagsOff || over.has(q.d.area)) && q.d.key !== hot && !q.look.match) continue;
+      if (live.hidden.has(q.look.name) || !tagged(q)) continue;
       sk.drawTag(ctx, q.at.x, q.at.y, q.look, env);
       tags.push(tagBox(ctx, q.at.x, q.at.y, q.look.label));
     }
     // A furniture item's own name (#2574: an NPC drawn as furniture), tagged like a person; none on a tile too small to read.
-    if (!tagsOff) for (const f of furniture) if (f.label) { sk.drawTag(ctx, f.x, f.y, { label: f.label }, env); tags.push(tagBox(ctx, f.x, f.y, f.label)); }
+    // #2698: an item hiding its people carries their tags too, in one row at its tag point (its own first; each keeps
+    // its place in the row while another's tag is left out), and their bubbles, over its picture. The tags drawn are
+    // kept on the scene (`heldTags`): hitPart hits each person on theirs, past the picture's edge too (#2699 review).
+    const held = [];
+    for (const f of furniture) {
+      const on = people.filter((q) => live.hidden.get(q.look.name) === f.id);
+      if (!on.length) {
+        if (!tagsOff && f.label) { sk.drawTag(ctx, f.x, f.y, { label: f.label }, env); tags.push(tagBox(ctx, f.x, f.y, f.label)); }
+        continue;
+      }
+      const order = new Map((f.activeFor || []).map((n, i) => [n, i]));
+      on.sort((x, y) => (order.get(x.look.name) ?? 0) - (order.get(y.look.name) ?? 0));
+      const row = tagRow(ctx, f.x, f.y, [...(f.label ? [{ label: f.label }] : []), ...on.map((q) => q.look)]);
+      const top = f.sprite ? Math.min(f.y - 50, stripBox(f.activeSprite || f.sprite, f.x, f.y).y + 2) : f.y - 50;
+      for (const [i, r] of row.entries()) {
+        const q = f.label ? on[i - 1] : on[i];
+        if (q) speakers.push({ look: q.look, x: r.x + 10, y: top, area: q.d.area });
+        if (q ? !tagged(q) : tagsOff) continue;
+        sk.drawTag(ctx, r.x, f.y, r.look, env);
+        const box = tagBox(ctx, r.x, f.y, r.look.label);
+        tags.push(box);
+        if (q) held.push({ name: q.look.name, id: f.id, box });
+      }
+    }
+    p.heldTags = held;
   } else {
     for (const d of p.desks) { const look = p.looks.get(d.key); sk.drawCharacter(ctx, d, actPosed(p, look), ms, env); speakers.push({ look, x: d.x + 58, y: d.y + 12 }); }
     blit(p.layers.front);
@@ -398,10 +462,30 @@ function drawPart(ctx, p, a, ox, oy, ms, still, hot, env, tagsOff = false, defer
  * The person at (x, y) in a scene's units, as it draws them: on zones where they walk, in the box the skin draws them
  * in (an uploaded character's strip, anchor and size: #2513 review), nearest first; on desks, the desk.
  */
-function hitPart(p, x, y, t) {
+export function hitPart(p, x, y, t) {
   if (!p.zones) return deskAt(p.L, x, y);
-  return personAt(p.all, x, y, (d) => p.walkers.at(d.node.name, t),
-    (d, at) => (p.skin.charBox && p.looks.get(d.key) ? p.skin.charBox(p.looks.get(d.key), at) : null));
+  // #2698: someone an item hides is hit on it, after everyone drawn as themselves: on their tag as drawPart last drew
+  // it (the row can run past the picture: a long label, long names), else on its picture and the tag row under it
+  // (several share its width, left to right in the row's order).
+  const { hidden } = furnitureAt(p, t);
+  const d = personAt(hidden.size ? p.all.filter((dk) => !dk.node || !hidden.has(dk.node.name)) : p.all, x, y, (dk) => p.walkers.at(dk.node.name, t),
+    (dk, at) => (p.skin.charBox && p.looks.get(dk.key) ? p.skin.charBox(p.looks.get(dk.key), at) : null));
+  if (d || !hidden.size) return d;
+  for (const h of [...(p.heldTags || [])].reverse()) {
+    const b = h.box;
+    if (hidden.get(h.name) !== h.id || x < b.x || x >= b.x + b.w || y < b.y || y >= b.y + b.h) continue;
+    return p.all.find((dk) => dk.node && dk.node.name === h.name) || null;
+  }
+  const sk = p.skin.pack, drawn = strollFurniture(p.night ? nightFurniture(sk.furniture) : sk.furniture, (k) => p.walkers.at(k, t));
+  for (const f of [...drawn].reverse()) {
+    if (!f.sprite || ![...hidden.values()].includes(f.id)) continue;
+    const b = hidingBox(f);
+    if (x < b.x || x >= b.x + b.w || y < b.y || y >= b.y + b.h) continue;
+    const order = new Map((f.activeFor || []).map((n, i) => [n, i]));
+    const on = p.all.filter((dk) => dk.node && hidden.get(dk.node.name) === f.id).sort((m, n) => (order.get(m.node.name) ?? 0) - (order.get(n.node.name) ?? 0));
+    return on[Math.min(on.length - 1, Math.floor(((x - b.x) / b.w) * on.length))] || null;
+  }
+  return null;
 }
 
 function People({ nodes, pinned, onChange }) {

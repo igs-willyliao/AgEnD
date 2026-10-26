@@ -437,14 +437,38 @@ export function linesFor(state, lang, pack, defaults) {
 
 // ── Furniture ──
 
-/** The furniture active now: an item whose `activeWhen` names a state someone shown is in. */
-export function activeFurniture(pack, states, byName = new Map()) {
+/**
+ * The people an item with `activeFor` is active for now (#2570): those of them shown in an `activeWhen` state — with
+ * "activeOn": "seated" (#2698), only those `posture(name)` says are "seated" (at the seat zones gave them, not walking).
+ * `posture` null: no walkers, everyone at their seat.
+ */
+function activeForNow(f, byName, posture) {
+  const seated = (n) => f.activeOn !== "seated" || !posture || posture(n) === "seated";
+  return (f.activeFor || [...byName.keys()]).filter((n) => byName.has(n) && f.activeWhen.includes(byName.get(n)) && seated(n));
+}
+/**
+ * The furniture active now: an item whose `activeWhen` names a state someone shown is in. With activeFor (#2570),
+ * only those people's states count; with "activeOn": "seated" (#2698), only once one of them is seated (`posture`,
+ * name → "walking" | "seated" | "standing"; null: everyone seated) — it turns back as they walk off.
+ */
+export function activeFurniture(pack, states, byName = new Map(), posture = null) {
   const on = new Set();
   for (const f of (pack && pack.furniture) || []) {
     if (!f.activeWhen) continue;
-    // activeFor (#2570): only those people's states count; else anyone's shown.
-    const hit = f.activeFor ? f.activeFor.some((n) => byName.has(n) && f.activeWhen.includes(byName.get(n))) : f.activeWhen.some((s) => states.has(s));
+    const hit = f.activeFor || f.activeOn === "seated" ? activeForNow(f, byName, posture).length > 0 : f.activeWhen.some((s) => states.has(s));
     if (hit) on.add(f.id);
   }
   return on;
+}
+/**
+ * #2698: who is drawn on an item instead of themselves (name → the item's id): for each `active` item with "hides",
+ * the people it is active for (activeFor's order) who are not walking — someone walking is always drawn. One item each.
+ */
+export function hiddenBy(pack, active, byName = new Map(), posture = null) {
+  const out = new Map();
+  for (const f of (pack && pack.furniture) || []) {
+    if (!f.hides || !f.activeWhen || !active.has(f.id)) continue;
+    for (const n of activeForNow(f, byName, posture)) if (!out.has(n) && (!posture || posture(n) !== "walking")) out.set(n, f.id);
+  }
+  return out;
 }
