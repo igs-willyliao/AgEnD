@@ -8,7 +8,33 @@ description: "從 AgEnD 2.2.x 升級會注意到的變化：升級前要先做�
   <img class="light:sl-hidden" src="https://raw.githubusercontent.com/songsid/AgEnD/main/docs/assets/readme/hero-dark.webp" width="880" alt="AgEnD 的網頁儀表板（示範資料）：側欄有六個 agent 和各自的狀態；與 agent Pixel 的對話裡有一張 bundle 大小的表格、一段程式碼、已選的「Ship it」回覆按鈕、一份附件報告，以及列出五個 AI 服務的用量面板。旁邊是一支手機，顯示同一段對話，附 Discord 與 Telegram 的標誌。">
 </p>
 
-AgEnD 2.3 是正式版。這一頁寫給從 2.2.x（尤其是 2.2.5 與 2.2.6）升級的人。先講升級時要做的事，再列指令的改名，最後依功能區分列出新功能。2.2 新增了什麼，請看[2.2 更新重點](/AgEnD/zh-tw/docs/whats-new-2-2/)。
+AgEnD 2.3 是正式版系列，目前的版本是 2.3.2。這一頁寫給從 2.2.x（尤其是 2.2.5 與 2.2.6）升級的人。先講升級時要做的事，再列指令的改名，最後依功能區分列出新功能。已經在用 2.3.1 或 2.3.2 beta？請從 [2.3.2 新增](#232-新增) 開始。2.2 新增了什麼，請看[2.2 更新重點](/AgEnD/zh-tw/docs/whats-new-2-2/)。
+
+## 2.3.2 新增
+
+2.3.2 收齊 2.3.2-beta.1 到 beta.16 的所有內容。完整清單見 [CHANGELOG](https://github.com/songsid/AgEnD/blob/main/docs/CHANGELOG.zh-TW.md)。
+
+**從 2.3.1 升級：**
+
+- 在 General 傳 `/update`，或在主機上執行 `agend update`。
+- **用經典引擎的 kiro：** kiro-cli 3.0 拿掉了它（`kiro_ui: legacy`，也是沒設定 `kiro_ui` 的 instance 的預設）。AgEnD 現在不讓 kiro 自行更新，新的 kiro instance 用 TUI 啟動。既有的 instance 請用 `migrate_kiro_instance` 連同對話一起搬過去，要 fleet 管理者在 General 確認。搬移是單向的。
+- **設定改版：** Fleet → Config 移除了，舊網址會導到新區段。修改要按 **儲存** 才生效；需要重啟的變更會在每一頁頂端提醒，AgEnD 不會自己重啟。
+- **辦公室裡的 agent 是新功能：** 沒有人為某個 agent 設定 `office_access`，`office_view` 與 `office_set` 就維持關閉。降回 2.3.1 時每間辦公室都會保留（只是沒有編輯配置的修改）。
+- **ClassicBot 的原生回覆：** 只有開啟 `reply_triggers` 才會觸發 bot（預設關閉）；@ 提及照常觸發。
+
+**從 2.3.2 beta 升級：** `agend update` 會留在 beta 頻道。要換到 2.3.2 請執行 `agend update --stable`；它比所有 2.3.2 beta 都新。beta 存下的私訊通知設定會視為開啟、發在 topic，並在留下備份後改寫。較早 beta 寫下的 `dashboard.office` 會搬到 `office_access`，並留備份。
+
+**新功能：**
+
+- **設定：** 依你會去找的位置分組（你自己；整個 Fleet：Agent、Agent 預設值、聊天與連線、網頁儀表板、存取與安全、進階），一套儲存方式，每個欄位都顯示生效中的值，可搜尋所有設定（`/` 或 Ctrl K），還有手機版面。
+- **[辦公室](/AgEnD/zh-tw/docs/office/)：** 畫師的外觀包、溫馨風格、編輯配置、所有辦公室、只放指定的人或沒有人的辦公室、任何人都能開的分享連結、等級與名片。
+- **訪客：** 管理員為每個人指定能看到的 agent（或 ClassicBot 聊天室），並可傳送登入碼；每次變更都有紀錄。
+- **用量報告：** 涵蓋 AgEnD 執行的每個 backend，新增推理欄；Kiro 的數字是估算值。
+- **kiro：** 搬到 TUI、在聊天裡回答 V3 的提問卡片、忙碌中的 kiro 幾秒內就收到訊息、不會把訊息打進佔用畫面的編輯器或 `!` 指令，以及重啟時會接上 `/compact` 之後的對話。
+- **Windows 安裝程式：** 用瀏覽器登入 Kiro、Claude Code 與 Codex，在 Windows Terminal 開啟，可選 WSL 磁碟，網路檢查會說明哪裡失敗，有安裝紀錄，會在裝到錯的帳號之前停下，並可選擇檢查與修復既有安裝。見 [Windows 安裝說明](/AgEnD/zh-tw/install-windows/)。
+- **[Docker](/AgEnD/zh-tw/docs/docker/)：** 一份讓 agent 照著在容器裡架設並維護 AgEnD 的操作手冊。
+- **其他：** 重啟後接續中斷的任務工作；agent 沒帶著對話重新開始時會通知你；設定頁的工作目錄可以留空，也有繁體中文；在聊天連線上設定的第一個 agent，若工作目錄留空，就是 fleet 的 General；「待你處理」只列真正等你的卡。
+
 
 ## 從 2.2.x 升級
 
@@ -30,7 +56,7 @@ AgEnD 2.3 是正式版。這一頁寫給從 2.2.x（尤其是 2.2.5 與 2.2.6）
 - **升級後預設值會改變的地方：**
   - **聊天裡的任務看板：** 需要你處理的卡片，要設 `needs_you.task_board: true` 才會出現在 General 的「等你處理」（#2425）。每日摘要要設 `defaults.task_board.summary_at` 才會發。
   - **新建立的 fleet：** 新的 `fleet.yaml` 會帶 `defaults.dashboard.task_board: false`（#2391）。既有的設定檔不會被改寫，任務看板照常可用。
-  - **Canvas Worker 特效是實驗功能，預設關閉**（#2275）。可以在「**設定 → 網頁外觀**」開啟。內建的環境效果（例如落花、點擊星星）不受影響。
+  - **Canvas Worker 特效是實驗功能，預設關閉**（#2275）。可以在「**設定 → 網頁儀表板**」開啟。內建的環境效果（例如落花、點擊星星）不受影響。
   - **CLI 的語言跟著 `defaults.locale`**（#2404）。沒設的話，時區為 UTC+8 的主機會用中文，給程式讀的那幾行固定保持英文。
   - **有安裝 AgEnD 服務的主機**（#2356）：手動執行 `agend fleet start` 和 `agend fleet stop` 會改交給 `agend start` 和 `agend stop`，不會在服務旁邊多跑一個 fleet。
 - **已知問題：**
@@ -94,13 +120,13 @@ AgEnD 2.3 是正式版。這一頁寫給從 2.2.x（尤其是 2.2.5 與 2.2.6）
 - **外觀：**
   - agent 的主題可以套用到整個頁面，包括左側欄、標題列和右側欄。可以在 **⋯ → 頁面配色** 覆蓋（#2196）。
   - 身分卡集中在聊天標題列的一個按鈕（#2217）。
-  - **自訂 App 圖示：** **設定 → 網頁外觀 → App 圖示**（#2308）。「加入主畫面」時會顯示你上傳的圖。
+  - **自訂 App 圖示：** **設定 → 網頁儀表板 → App 圖示**（#2308）。「加入主畫面」時會顯示你上傳的圖。
 - **用量面板：**
   - 標題旁有 **完整／精簡** 切換。精簡檢視依供應商分組，每個帳號幾行：名稱、方案和重置時間，再加上較短和較長的時間窗（有的話）各一條長條和百分比（不到兩天的，例如 5 小時；兩天以上的，例如一週或一個月）。Antigravity 則是每個額度池一行。你的選擇會同步到每一台裝置。
   - 每個 Claude 登入各一列，包括預設帳號和每個 profile（#2236）。額度用完會顯示 100% 和重置時間；被限流會顯示「Rate limited」。
   - 讀不到數字時，面板會保留上次的數字並標示「已過期 · 快取於 HH:MM」，不會閃出「無法載入」（#2236、#2385）。
   - Antigravity 會顯示方案名稱；付費方案會顯示正確的 Gemini 額度。Gemini 4 Argon 有自己的一行（#2240）。
-- **Canvas Worker 特效（實驗功能，預設關閉）：** 開啟 `web.experimental.canvas_worker`（或在 **設定 → 網頁外觀** 打開開關）後，可以上傳特效、放到聊天或個人區域，agent 也能用工具放置自己的特效（#1629）。特效在隔離的 worker 裡執行，接觸不到頁面內容和輸入框。
+- **Canvas Worker 特效（實驗功能，預設關閉）：** 開啟 `web.experimental.canvas_worker`（或在 **設定 → 網頁儀表板** 打開開關）後，可以上傳特效、放到聊天或個人區域，agent 也能用工具放置自己的特效（#1629）。特效在隔離的 worker 裡執行，接觸不到頁面內容和輸入框。
 
 ### 遠端存取與安全
 
