@@ -162,6 +162,11 @@ function payloadRequiresReply(payload: unknown): boolean {
   return !!meta && typeof meta === "object" && (meta as Record<string, unknown>).requires_reply === "true";
 }
 
+/** Whether a row's payload asks for a reply (an unreadable payload: no). */
+function rowRequiresReply(row: OutboxRow): boolean {
+  try { return payloadRequiresReply(JSON.parse(row.payload_json)); } catch { return false; }
+}
+
 function payloadMessageId(payload: unknown): string | null {
   const meta = payload && typeof payload === "object" ? (payload as Record<string, unknown>).meta : undefined;
   const id = meta && typeof meta === "object" ? (meta as Record<string, unknown>).message_id : undefined;
@@ -1394,10 +1399,12 @@ export class DeliveryOutbox extends EventEmitter {
   }
   private claimNextSync(managerBootId: string, targetBootIdFor: (target: string) => string | null, blockedTargets: ReadonlySet<string>, eligible?: (delivery: OutboxDelivery) => boolean): ClaimedOutboxDelivery | undefined {
     const now = new Date().toISOString();
-    const rows = this.db.prepare(`
+    const pending = this.db.prepare(`
       SELECT * FROM deliveries WHERE state IN ('queued','retry_wait')
       ORDER BY created_seq
     `).all() as OutboxRow[];
+    const superseded = this.supersedeThreadRows(pending, now);
+    const rows = superseded.size ? pending.filter(row => !superseded.has(row.delivery_id)) : pending;
     // The oldest pending row owns its target lane even while it is in retry
     // backoff or the target is temporarily unavailable. Later rows must not
     // pass it merely because they happen to be eligible first.
@@ -1428,6 +1435,40 @@ export class DeliveryOutbox extends EventEmitter {
       if (claimed) return { ...claimed, targetDaemonBootId: targetBootId };
     }
     return undefined;
+  }
+
+  /**
+   * #2785 (b): a message still waiting while a newer one from the same sender to the same target on the same thread
+   * (correlation_id) waits behind it is not delivered — the newer one replaces it (a review round for an older PR head, a
+   * CI result since overtaken). Only agents' messages (fleet_inbound, steer) that never began: a row with any attempt
+   * other than an aborted one keeps its place. The dropped row is `cancelled`, its reason naming the newer delivery, and
+   * stays readable (delivery_status, Fleet traffic). A reply obligation opens only on delivery, from the delivered row's own
+   * payload: a row that requires a reply is replaced only by one that requires one too, else it keeps its place (#2797
+   * review — an update without requires_reply must not swallow the request it follows).
+   */
+  private supersedeThreadRows(pending: readonly OutboxRow[], now: string): Set<string> {
+    const newest = new Map<string, OutboxRow>();
+    const keyOf = (row: OutboxRow) => (row.kind === "fleet_inbound" || row.kind === "steer") && row.correlation_id
+      ? `${row.source_instance}\u0000${row.target_instance}\u0000${row.correlation_id}` : null;
+    for (const row of pending) { const key = keyOf(row); if (key) newest.set(key, row); }   // ascending: the last wins
+    const candidates = pending.filter(row => { const key = keyOf(row); return key !== null && newest.get(key)!.delivery_id !== row.delivery_id; });
+    if (!candidates.length) return new Set();
+    const begun = this.db.prepare("SELECT 1 FROM delivery_attempts WHERE delivery_id=? AND state<>'aborted' LIMIT 1");
+    const cancel = this.db.prepare(`UPDATE deliveries SET state='cancelled',finished_at=?,updated_at=?,last_error=?,next_attempt_at=NULL
+      WHERE delivery_id=? AND state IN ('queued','retry_wait')`);
+    const done = this.db.transaction(() => {
+      const out: string[] = [];
+      for (const row of candidates) {
+        if (begun.get(row.delivery_id)) continue;
+        const newer = newest.get(keyOf(row)!)!;
+        if (rowRequiresReply(row) && !rowRequiresReply(newer)) continue;
+        const by = newer.delivery_id;
+        if (cancel.run(now, now, `superseded by ${by}`, row.delivery_id).changes === 1) out.push(row.delivery_id);
+      }
+      return out;
+    })();
+    for (const deliveryId of done) this.emit("state", { deliveryId, state: "cancelled" });
+    return new Set(done);
   }
 
   /** Idempotent begin permit, committed immediately before the pane side effect. */
