@@ -173,6 +173,10 @@ export interface ProjectStats {
 /** A card as the dashboard draws it: references by card number. */
 export interface CardView {
   id: string;
+  /** #2080: in review needing the person's confirmation, or blocked on a question theirs (waitsForPerson): Waiting for you. */
+  waitsForPerson: boolean;
+  /** #2080: the instance that confirms it in review (its dispatcher, else its assignee); null when the person does. */
+  confirmer: string | null;
   uuid: string;
   kind: CardKind;
   projectId: number | null;
@@ -239,7 +243,7 @@ export interface CardEvent {
  * a main task went to the person by itself before its owner wrapped it up (wrap_up); or someone else cancelled it — a
  * main task's cancel takes its unfinished sub tasks down with it, and their assignees hear (cancelled).
  */
-export type WakeReason = "assigned" | "start" | "sent_back" | "answered" | "comment" | "ready" | "decide" | "to_confirm" | "approved" | "wrap_up" | "cancelled";
+export type WakeReason = "assigned" | "start" | "sent_back" | "answered" | "comment" | "ready" | "decide" | "to_confirm" | "confirm_own" | "approved" | "wrap_up" | "cancelled";
 
 /** One card's news for one instance from one committed write. Never sent to a page (it carries titles and text). */
 export interface Wake {
@@ -445,6 +449,15 @@ export function confirmerOf(card: Pick<Card, "dispatcher" | "assignee">): string
   if (card.dispatcher?.kind === "person") return "the person";
   if (card.dispatcher?.kind === "instance") return card.dispatcher.name;
   return card.assignee ?? "its assignee";
+}
+/**
+ * #2080: the instance that confirms a card in review (`confirms`' rule), or null when it is the person's — handed out by
+ * them, or by an instance deleted since (`gone`), or nobody's at all.
+ */
+export function confirmingInstance(card: Pick<Card, "dispatcher" | "assignee" | "createdBy">, gone?: GoneDispatcher): string | null {
+  if (personConfirms(card) || orphaned(card, gone)) return null;
+  if (card.dispatcher?.kind === "instance") return card.dispatcher.name;
+  return card.assignee ?? (card.createdBy || null);
 }
 
 function normalizeAssignee(raw: string | null | undefined): string | null {
@@ -837,10 +850,11 @@ export class TaskBoard {
   /**
    * Each project's numbers (by id; "none" for No project) over all its cards, finished ones included: main tasks,
    * work units (a main task's sub tasks, or one unit for a main task without them; a done main task counts all its
-   * units done), cards waiting for the person and blocked, and the last change. One pass over the table.
+   * units done), cards waiting for the person and blocked, and the last change. One pass over the table. #2080: waiting
+   * counts only the cards in review the person confirms (waitsForPerson, `gone` as for Needs you), never an agent's.
    */
-  projectStats(): Record<string, ProjectStats> {
-    const rows = this.db.prepare("SELECT id, kind, status, project_id, parent_id, updated_at FROM tasks").all() as Row[];
+  projectStats(gone?: GoneDispatcher): Record<string, ProjectStats> {
+    const rows = this.db.prepare("SELECT id, kind, status, project_id, parent_id, updated_at, needs_review, dispatcher, dispatcher_kind FROM tasks").all() as Row[];
     const subs = new Map<string, Progress>();
     for (const r of rows) {
       if (r.kind !== "sub" || !r.parent_id || r.status === "cancelled") continue;
@@ -856,7 +870,8 @@ export class TaskBoard {
       if (!st.lastActivity || (r.updated_at as string) > st.lastActivity) st.lastActivity = r.updated_at as string;
       const status = r.status as CardStatus;
       if (status === "cancelled") continue;
-      if (status === "review") st.waiting++;
+      if (status === "review" && waitsForPerson({ status, needsReview: Number(r.needs_review) === 1,
+        dispatcher: r.dispatcher ? { kind: r.dispatcher_kind === "person" ? "person" : "instance", name: r.dispatcher as string } : null }, gone)) st.waiting++;
       if (status === "blocked") st.blocked++;
       if (r.kind === "sub") continue;
       st.mains++;
@@ -869,8 +884,8 @@ export class TaskBoard {
     return out;
   }
 
-  view(card: Card, scope: ReadScope = {}): CardView {
-    return this.views([card], scope)[0]!;
+  view(card: Card, scope: ReadScope = {}, gone?: GoneDispatcher): CardView {
+    return this.views([card], scope, gone)[0]!;
   }
 
   /** ` AND <column> NOT IN (…)` for a scope's left-out authors, with its values (empty when none). */
@@ -885,7 +900,7 @@ export class TaskBoard {
    * queries per card: a board read stays a handful of statements however many cards it has (it runs on the fleet's
    * event loop). Same answers as progress(), unmetDeps() and newComments() card by card.
    */
-  views(cards: Card[], scope: ReadScope = {}): CardView[] {
+  views(cards: Card[], scope: ReadScope = {}, gone?: GoneDispatcher): CardView[] {
     if (!cards.length) return [];
     type Light = { code: string; status: CardStatus; deps: string[]; parent: string | null };
     const all = new Map<string, Light>();
@@ -922,6 +937,8 @@ export class TaskBoard {
       const c = comments.get(card.uuid);
       return {
         id: card.code,
+        waitsForPerson: waitsForPerson(card, gone),
+        confirmer: confirmingInstance(card, gone),
         uuid: card.uuid,
         kind: card.kind,
         projectId: card.projectId,
@@ -958,17 +975,27 @@ export class TaskBoard {
     });
   }
 
-  detail(ref: string, scope: ReadScope = {}): CardDetail {
+  detail(ref: string, scope: ReadScope = {}, gone?: GoneDispatcher): CardDetail {
     const card = this.getCard(ref);
     const parent = card.parent ? this.byUuid(card.parent) : undefined;
     return {
-      card: this.view(card, scope),
+      card: this.view(card, scope, gone),
       parent: parent ? { id: parent.code, title: parent.title, status: parent.status } : null,
-      children: this.views(this.children(card.uuid), scope),
+      children: this.views(this.children(card.uuid), scope, gone),
       comments: this.entries(card.uuid, ["comment", "reject", "approve"], 200),
       logs: this.entries(card.uuid, ["log"], 200),
       history: this.events(card.uuid, 200).filter((e) => e.type !== "reordered"),
     };
+  }
+
+  /**
+   * #2757 review: the instance dispatchers on the board that `gone` says are gone, as one string — what a cached read
+   * that names waitsForPerson / confirmer must also be keyed by (a dispatcher deleted changes them, the revision not).
+   */
+  goneDispatchers(gone?: GoneDispatcher): string {
+    if (!gone) return "";
+    const rows = this.db.prepare("SELECT DISTINCT dispatcher FROM tasks WHERE dispatcher IS NOT NULL AND (dispatcher_kind IS NULL OR dispatcher_kind != 'person')").all() as Row[];
+    return rows.map((r) => r.dispatcher as string).filter((n) => gone(n)).sort().join("\u0000");
   }
 
   /** The latest `limit` entries of a card, oldest first. */
@@ -1530,7 +1557,7 @@ export class TaskBoard {
       if (derived) this.checkDerivedMove(card, actor, to, reason, { comment });
       else this.checkManualMove(card, actor, to, reason, { comment });
 
-      this.applyMove(card, actor, to, reason, comment);
+      this.applyMove(card, actor, this.ownReview(card, actor, to, reason), reason, comment);
       return { card, from, ...this.spoken() };
     });
   }
@@ -1694,6 +1721,8 @@ export class TaskBoard {
             if (to === "done" && card.status !== "review" && requiresReview(card) && !confirms(card, actor)) to = "review";
             if (held && to !== card.status) this.checkManualMove(card, actor, to, "");
           }
+          // #2757 review: a derived main task too; a card off the board (not held) keeps the tool's old, unchecked finish.
+          to = this.ownReview(card, actor, to, "", held);
         }
         if (to !== card.status) {
           this.applyMove(card, actor, to, "");
@@ -1713,6 +1742,20 @@ export class TaskBoard {
   }
 
   // ── Rules ───────────────────────────────────────────────
+
+  /**
+   * #2080: review for an instance's own confirmation is done. An instance moving a card to review that it confirms itself
+   * (nobody else handed it out, or it handed it to itself) would wait for nobody but itself — and sat there unnoticed,
+   * in the person's Waiting for you too: it finishes instead (the checks for review are the ones for done). A person's
+   * move, and a card someone else confirms, stay as asked.
+   */
+  private ownReview(card: Card, actor: Actor, to: CardStatus, reason = "", check = true): CardStatus {
+    if (to !== "review" || isPerson(actor) || card.status === "review" || !confirms(card, actor)) return to;
+    // #2757 review: finished as done is, whichever way it came (a derived main task's review checks less).
+    if (check) this.checkFinish(card, true, reason);
+    this.say("own_review", [card.code], `${card.code} waits for nobody else's confirmation (you confirm it): done, not review`);
+    return "done";
+  }
 
   /**
    * Cards moved by hand: sub tasks, and main tasks that have no sub tasks. `comment` is the move's own comment (a
@@ -1857,6 +1900,12 @@ export class TaskBoard {
       return;
     }
     if (ai) {
+      // #2080: a main task in review by itself (its sub tasks done) is finished by the instance that confirms it.
+      if (from === "review" && to === "done" && confirms(card, actor)) {
+        if (reason) this.entry(card, "approve", actor, reason);
+        this.checkFinish(card, ai, reason);
+        return;
+      }
       if (from === "claimed" && to === "review") {
         if (!own) throw notOwner();
         if (!this.activeSubs(card.uuid).every((k) => k.status === "done")) {
@@ -2125,6 +2174,9 @@ export class TaskBoard {
         // An agent's card waits for its instance dispatcher to confirm it (#2434: its own to confirm, nobody to ask). A
         // person's card has no instance dispatcher, so no notice: the person has it in Needs you.
         if (d.to === "review" && !isPerson(e.actor) && requiresReview(card)) add(card, dispatcherOf(), "to_confirm", e.actor);
+        // #2080: a card its own assignee confirms, in review by itself (its sub tasks done) or by someone else's move:
+        // nobody else will confirm it, so its assignee is told it is theirs.
+        if (d.to === "review" && card.assignee && confirmingInstance(card) === card.assignee) add(card, card.assignee, "confirm_own", e.actor);
         if (d.auto) {
           if (d.to === "review" && card.kind === "main" && wrapUpGap(card)) add(card, card.assignee, "wrap_up", e.actor);
           continue;
@@ -2172,6 +2224,7 @@ export class TaskBoard {
       // #2341 review: and still waiting for the person — its confirmation not switched off during the gather.
       if (r === "to_confirm") return handedOut && card.status === "review" && requiresReview(card);
       if (!own) return false;
+      if (r === "confirm_own") return card.status === "review" && confirmingInstance(card) === wake.instance;
       if (r === "wrap_up") return card.status === "review" && wrapUpGap(card) !== null;
       if (r === "assigned") return !waiting;
       if (r === "comment") return !waiting && this.newComments(card).length > 0;

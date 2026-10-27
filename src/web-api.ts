@@ -432,6 +432,8 @@ export interface WebApiContext {
   readonly themeStore?: ThemeStore;
   /** Fleet → Org chart → Office: the offices people made (web-offices.json); absent: /ui/offices is not offered. */
   readonly officeStore?: OfficeStore;
+  /** #2080: an instance dispatcher no longer in the fleet (its cards fall back to the person: Waiting for you). */
+  readonly dispatcherGone?: (name: string) => boolean;
   /** How often a person may save the offices (absent: no limit, as in a test without it). */
   readonly officeWrites?: OfficeWriteLimiter;
   /** #2578: the agents' live acts in the Office view (office_set); absent: /ui/office-acts is not offered. */
@@ -2699,7 +2701,8 @@ export function handleWebRequest(
         // #2296: every open Tasks tab reads the board again after each change; on the dashboard they all get the same
         // board for a revision, so it is built once per (revision, done=all, minute) — the minute for the 14-day
         // window. The public link's reads are filtered per request (hidden instances) and are built each time.
-        const key = gateway ? null : `${rev}:${allDone ? 1 : 0}:${Math.floor(Date.now() / 60_000)}`;
+        // #2757 review: and by the dispatchers gone (a deleted one makes its cards the person's, the revision unchanged).
+        const key = gateway ? null : `${rev}:${allDone ? 1 : 0}:${Math.floor(Date.now() / 60_000)}:${board.goneDispatchers(ctx.dispatcherGone)}`;
         const kept = key ? boardBodies.get(board) : undefined;
         if (kept && kept.key === key) { jsonText(res, 200, kept.body); return true; }
         const cards = board.boardCards(undefined, allDone).filter((c) => !hidden(c));
@@ -2708,7 +2711,7 @@ export function handleWebRequest(
         // #2355 review: the names a project's lead may be — the fleet's instances (a Classic-only room is not one); over the
         // public link, not a hidden one.
         const leads = Object.keys(ctx.fleetConfig?.instances ?? {}).filter((n) => !hiddenName(n)).sort();
-        const body = JSON.stringify({ rev, cards: board.views(cards, scope), projects, leads, stats: board.projectStats() });
+        const body = JSON.stringify({ rev, cards: board.views(cards, scope, ctx.dispatcherGone), projects, leads, stats: board.projectStats(ctx.dispatcherGone) });
         if (key) boardBodies.set(board, { key, body });
         jsonText(res, 200, body);
         return true;
@@ -2722,14 +2725,14 @@ export function handleWebRequest(
         // by every open drawer (the public link's is filtered per request, as the board's).
         const only = url.searchParams.get("instance");
         const names = (only ? [only] : [...new Set([...Object.keys(ctx.fleetConfig?.instances ?? {}), ...board.liveAssignees()])]).filter((n) => !hiddenName(n));
-        const key = gateway ? null : `${board.revision()}:${only === null ? "*" : `=${only}`}:${names.join("\u0000")}`;
+        const key = gateway ? null : `${board.revision()}:${only === null ? "*" : `=${only}`}:${names.join("\u0000")}:${board.goneDispatchers(ctx.dispatcherGone)}`;
         const kept = key ? workBodies.get(board) : undefined;
         if (kept && kept.key === key) { jsonText(res, 200, kept.body); return true; }
         const byName = board.workOf(names);
         const works = names.map((name) => ({ name, w: byName.get(name)! }));
         const all = new Map<string, Parameters<typeof board.views>[0][number]>();
         for (const { w } of works) for (const c of [...w.doing, ...w.blocked, ...w.review, ...w.ready, ...w.waiting.map((x) => x.card), ...w.mains.map((x) => x.card)]) if (!hidden(c)) all.set(c.uuid, c);
-        const viewOf = new Map(board.views([...all.values()], scope).map((v) => [v.uuid, v]));
+        const viewOf = new Map(board.views([...all.values()], scope, ctx.dispatcherGone).map((v) => [v.uuid, v]));
         const drawn = (cards: Array<{ uuid: string }>) => cards.flatMap((c) => (viewOf.has(c.uuid) ? [viewOf.get(c.uuid)!] : []));
         const codes = (cards: Array<{ card: { uuid: string; code: string } }>) => cards.filter((x) => all.has(x.card.uuid)).map((x) => x.card.code);
         const body = JSON.stringify({ instances: works.map(({ name, w }) => ({
@@ -2745,7 +2748,7 @@ export function handleWebRequest(
       if (method === "GET" && path === "/ui/tasks/search") {
         const names = new Map(board.listProjects(true).map((p) => [p.id, p.name]));
         const hits = board.search(url.searchParams.get("q") ?? "", Number(url.searchParams.get("limit")) || 20, scope).filter((h) => !hidden(h.card));
-        const views = board.views(hits.map((h) => h.card), scope);
+        const views = board.views(hits.map((h) => h.card), scope, ctx.dispatcherGone);
         const results = hits.map(({ card: c, match }, i) => ({
           card: views[i],
           match,
@@ -2758,13 +2761,13 @@ export function handleWebRequest(
       if (method === "GET" && card && !card[2]) {
         const found = board.getCard(ref);
         if (hidden(found)) { json(res, 404, { error: "no such card", code: "not_found" }); return true; }
-        json(res, 200, shown(board.detail(ref, scope)));
+        json(res, 200, shown(board.detail(ref, scope, ctx.dispatcherGone)));
         return true;
       }
       if (method === "POST" && path === "/ui/tasks/cards") {
         boardWrite(req, res, url, ctx, board, CardCreateSchema, (spec, person) => {
           const { cards, said } = board.createCards(person, { cards: [spec] });
-          return { card: board.view(cards[0]!), notes: said };
+          return { card: board.view(cards[0]!, {}, ctx.dispatcherGone), notes: said };
         });
         return true;
       }
@@ -2772,14 +2775,14 @@ export function handleWebRequest(
         if (card[2] === "move") {
           boardWrite(req, res, url, ctx, board, CardMoveSchema, ({ to, ...move }, person) => {
             const { card: moved, said } = board.moveCard(person, ref, to, move);
-            return { card: board.view(moved), notes: said };
+            return { card: board.view(moved, {}, ctx.dispatcherGone), notes: said };
           });
         } else if (card[2] === "reorder") {
-          boardWrite(req, res, url, ctx, board, CardReorderSchema, ({ after, before }, person) => ({ card: board.view(board.reorder(person, ref, after ?? null, before ?? null)) }));
+          boardWrite(req, res, url, ctx, board, CardReorderSchema, ({ after, before }, person) => ({ card: board.view(board.reorder(person, ref, after ?? null, before ?? null), {}, ctx.dispatcherGone) }));
         } else {
           boardWrite(req, res, url, ctx, board, CardPatchSchema, (patch, person) => {
             const { card: updated, said } = board.updateCard(person, ref, patch);
-            return { card: board.view(updated), notes: said };
+            return { card: board.view(updated, {}, ctx.dispatcherGone), notes: said };
           });
         }
         return true;
