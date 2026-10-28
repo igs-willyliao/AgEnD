@@ -246,7 +246,8 @@ The sidebar's **Fleet** (zh "Fleet 概覽", at the top) and the phone's Fleet ta
   delete: cancel. Alt+arrows on a card's title move it (no drag needed; the card's Position row on a phone). A main
   task's tile shows the sub task at work and who is on it; a card waiting for review that is not wrapped up says
   **To fill in** and Confirm asks first. A card's **Dispatched by** row: who handed it out (a blocked question goes
-  to them first). Read-only over the public link. The cards you handed out that wait for your confirmation, or are
+  to them first). An agent with the task board off (Dashboard access) is greyed out as an assignee: the board hands
+  it no cards. Read-only over the public link. The cards you handed out that wait for your confirmation, or are
   blocked, are also **Needs you** items: on the web they open the card; in each bot's live message in General they
   have **Confirm** / **Send back** / **Answer** (the words are a reply to the bot's prompt).
 - **Schedules** — every schedule (silent ones included): when it runs in words, "next …", the target. **New
