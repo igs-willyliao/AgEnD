@@ -91,6 +91,11 @@ or the board itself.
   - *A dispatcher's answer* to a blocked card whose assignee is at its limit does not start the card: the answer is
     kept on it as a comment (the assignee is told), the card stays blocked, and the assignee resumes it when it has
     room (#2303 review).
+  - *The next card.* An instance that stops working on its card (in progress → done, review, blocked or cancelled) is
+    told in the same answer which card it can start next (a `next_card` note): the first ready one in `mine`'s order,
+    its own before one nobody has under a main task it coordinates, unless it is still at its limit. Its own move
+    wakes nobody, and a card assigned while it was busy was told once, long before: without the note it had to
+    remember to look.
 - **Taking a card back out of review.** An instance that withdraws its own card from `review` says why: the reason is
   a comment on the card ("withdrawn from review: …"), so the card never leaves the person's queue silently.
 - **Comments an assignee has not seen.** Comments and send-backs by others after the assignee's last write are new to

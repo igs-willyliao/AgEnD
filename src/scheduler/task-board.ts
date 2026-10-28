@@ -2026,6 +2026,9 @@ export class TaskBoard {
     if (card.kind === "main" && (from === "cancelled" || from === "blocked")) this.deriveMain(card, actor);
     if (card.parent) { const main = this.byUuid(card.parent); if (main) this.deriveMain(main, actor); }
     if (to === "done") this.noteUnblocked(card);
+    // An instance that stops working on its card — finished, waiting for confirmation, blocked, cancelled — hears what
+    // it can start next: no notice tells it (its own move wakes nobody), and nothing else makes it look.
+    if (from === "claimed" && to !== "open" && actor.kind === "instance" && card.assignee === actor.name) this.noteNext(actor.name);
   }
 
   /**
@@ -2097,6 +2100,21 @@ export class TaskBoard {
     for (const dependent of rows.map(toCard)) {
       if (this.unmetDeps(dependent).length === 0) this.say("deps_done", [dependent.code], `${dependent.code}'s dependencies are all done; it can start`);
     }
+  }
+
+  /**
+   * The card `name` can start next, in `task mine`'s order (by priority, then place): its own first, else one nobody
+   * has under a main task it coordinates. Nothing while it is still at its limit of cards in progress.
+   */
+  private noteNext(name: string): void {
+    if (this.inProgress(name).filter((c) => !openedForItself(c)).length >= this.limitOf(name)) return;
+    const { ready } = this.myWork(name);
+    const next = ready.find((c) => c.assignee === name) ?? ready[0];
+    if (!next) return;
+    const more = ready.length - 1;
+    const main = next.assignee ? "" : ` (unassigned, a sub task of your ${next.parent ? this.codeOf(next.parent) : "main task"}: take it or assign it)`;
+    this.say("next_card", [next.code, next.title, more],
+      `next: ${next.code} "${next.title}"${next.priority === "normal" ? "" : ` (${next.priority})`} is ready${main} — start it: move ${next.code} to claimed${more ? `; ${more} more ready (task mine)` : ""}`);
   }
 
   /** Every card's place again 1, 2, 3… in the same order (reorder() calls it when two neighbours touch). */
