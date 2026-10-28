@@ -1505,6 +1505,8 @@ export class Daemon extends EventEmitter {
   private bootSkippedResume = false;
   private recoveryCrashLoopFresh = false;
   private recoveryFreshChoice = false;
+  /** The current boot found a crash-loop marker and is attempting resume rather than going fresh immediately. */
+  private bootCrashLoopResume = false;
   private startupAborted = false;
   /** First time the current on-screen blocking dialog was seen (0 = none); drives the parked report. */
   private dialogParkedSince = 0;
@@ -2529,19 +2531,38 @@ export class Daemon extends EventEmitter {
     this.bootSkippedResume = false;
     this.recoveryCrashLoopFresh = false;
     this.recoveryFreshChoice = false;
+    this.bootCrashLoopResume = false;
     try {
       if (existsSync(crashStatePath)) {
         const content = readFileSync(crashStatePath, "utf-8");
         try {
           const state = JSON.parse(content);
-          if (state?.resumeDisabled === true) {
+          if (state?.resumeFailed === true) {
+            // The previous start tried resume after a crash loop but the resumed
+            // session died before reaching ready. Go fresh this time.
             this.skipResume = true;
             this.bootSkippedResume = true;
-            this.recoveryCrashLoopFresh = (state.reason === undefined || state.reason === "crash_loop")
+            this.recoveryCrashLoopFresh = true;
+            this.recoveryFreshChoice = false;
+            this.logger.warn("Previously resumed session died quickly after a crash loop — starting fresh");
+          } else if (state?.resumeDisabled === true) {
+            // Crash loop detected, but the session is not proven broken.
+            // Try resume first; if it dies before reaching ready, the next
+            // boot will see resumeFailed and go fresh (PR #2809).
+            const isCrashLoop = (state.reason === undefined || state.reason === "crash_loop")
               && Number.isInteger(state.crashesInWindow) && state.crashesInWindow >= 3
               && Number.isFinite(state.lastCrashAt) && state.lastCrashAt > 0;
-            this.recoveryFreshChoice = !this.recoveryCrashLoopFresh;
-            this.logger.warn("Previous crash loop detected — starting without resume");
+            if (isCrashLoop) {
+              this.bootCrashLoopResume = true;
+              this.logger.warn("Previous crash loop detected — attempting resume (will fall back to fresh if session is broken)");
+            } else {
+              // Explicit fresh-start request (not a crash loop); honour it.
+              this.skipResume = true;
+              this.bootSkippedResume = true;
+              this.recoveryCrashLoopFresh = false;
+              this.recoveryFreshChoice = true;
+              this.logger.warn("Previous crash loop detected — starting without resume");
+            }
           }
         } finally {
           try { unlinkSync(crashStatePath); } catch { /* best effort */ }
@@ -11426,6 +11447,8 @@ export class Daemon extends EventEmitter {
     // id it does not own must be out of the way first, or it would be recorded
     // as this backend's and resumed by the next start.
     this.startupAdmission?.(); this.setAsideForeignSession();
+    // A crash-loop-resume boot should attempt resume even though skipResume is false:
+    // bootCrashLoopResume set at boot means we had a crash loop but try resume first.
     const attemptedResume = !this.skipResume;
     // A resume launch may get a longer budget than a fresh one (kiro: the
     // conversation must come back from the backend before anything paints).
@@ -11512,6 +11535,19 @@ export class Daemon extends EventEmitter {
       }
       this.setSessionAside(proven ? "cli_reported_no_conversation" : "resume_failed_repeatedly");
       this.skipResume = true;
+      // If this was a crash-loop-resume attempt, the session is now proven
+      // broken. Persist resumeFailed so the next restart goes fresh without
+      // attempting resume again.
+      if (this.bootCrashLoopResume) {
+        try {
+          writeFileSync(join(this.instanceDir, "crash-state.json"), JSON.stringify({
+            resumeFailed: true,
+            failedAt: Date.now(),
+          }));
+        } catch { /* best effort */ }
+        this.logger.warn("Crash-loop-resume: session abandoned — next boot will go fresh");
+        this.bootCrashLoopResume = false;
+      }
       }
       // A fresh start that also failed retries once, as before. It never clears
       // a session: nothing about a failed fresh launch says the stored
@@ -11530,8 +11566,32 @@ export class Daemon extends EventEmitter {
       this.startupAdmission?.();
         throw new Error("CLI failed to start after retry");
       }
+      // Fresh fallback succeeded. Clear any resumeFailed marker written during this
+      // boot's setSessionAside path, so the next normal restart is not forced fresh.
+      // NOTE: bootCrashLoopResume is already false here (cleared by setSessionAside path),
+      // so check the marker directly rather than relying on the flag.
+      try {
+        const p = join(this.instanceDir, "crash-state.json");
+        if (existsSync(p)) {
+          const s = JSON.parse(readFileSync(p, "utf-8"));
+          if (s?.resumeFailed === true) unlinkSync(p);
+        }
+      } catch { /* best effort */ }
     } else if (attemptedResume) {
       resumedSuccessfully = true;
+      if (this.bootCrashLoopResume) {
+        // Resume succeeded after a crash loop — clear any stale resumeFailed marker
+        // that might have been written by a concurrent write or a previous attempt,
+        // so the next restart is not forced fresh.
+        this.bootCrashLoopResume = false;
+        try {
+          const p = join(this.instanceDir, "crash-state.json");
+          if (existsSync(p)) {
+            const s = JSON.parse(readFileSync(p, "utf-8"));
+            if (s?.resumeFailed === true) unlinkSync(p);
+          }
+        } catch { /* best effort */ }
+      }
       this.clearUnprovenResumeFailures();
       // A resume needs the backend: its success is positive proof the backend
       // is reachable again (a fresh prompt is local and proves nothing).
