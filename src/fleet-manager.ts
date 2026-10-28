@@ -14921,6 +14921,7 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
         pauseReason, pausedAt,
         crashedAt: crashed ? (this.needsCrashedAt.get(name) ?? null) : null,
         signIn: pauseReason === "auth" ? this.signInFor(name) : null,
+        usageHold: this.daemons.get(name)?.usageHold?.() ?? null,
       });
     }
     return out;
