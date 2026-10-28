@@ -105,6 +105,7 @@ const HOT_KEY_PROBES: Record<string, unknown> = {
   log_level: "debug",
   cross_instance_visibility: "summary",
   board_cards_at_once: 3,
+  board_cards_strict: true,
   dashboard: { appearance: false, task_board: true },
   office_access: true,
   office_pack_access: true,

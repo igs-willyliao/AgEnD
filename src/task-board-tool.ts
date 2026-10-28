@@ -153,6 +153,14 @@ export function boardActivity(args: Record<string, unknown>): string | null {
  * #2303: how many handed-out board cards an instance may have in progress at once — its `board_cards_at_once`, else
  * 1 (the validator holds it to a whole number of at least 1; anything else here counts as 1).
  */
+/**
+ * Strict cards: whether an instance is held to filled-in cards — its `board_cards_strict` (merged from the defaults when
+ * fleet.yaml loads), else not.
+ */
+export function boardCardsStrict(fleet: { instances?: Record<string, { board_cards_strict?: unknown } | undefined> } | null | undefined, name: string): boolean {
+  return !!fleet?.instances && Object.prototype.hasOwnProperty.call(fleet.instances, name) && fleet.instances[name]?.board_cards_strict === true;
+}
+
 export function boardCardLimit(fleet: { instances?: Record<string, { board_cards_at_once?: unknown } | undefined> } | null | undefined, name: string): number {
   const own = fleet?.instances && Object.prototype.hasOwnProperty.call(fleet.instances, name) ? fleet.instances[name]?.board_cards_at_once : undefined;
   return typeof own === "number" && Number.isInteger(own) && own >= 1 ? own : 1;

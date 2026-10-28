@@ -7015,6 +7015,8 @@ export class Daemon extends EventEmitter {
     else if (update.cross_instance_visibility === null) delete this.config.cross_instance_visibility;
     if (Number.isInteger(update.board_cards_at_once) && (update.board_cards_at_once as number) >= 1) this.config.board_cards_at_once = update.board_cards_at_once as number;
     else if (update.board_cards_at_once === null) delete this.config.board_cards_at_once;
+    if (typeof update.board_cards_strict === "boolean") this.config.board_cards_strict = update.board_cards_strict;
+    else if (update.board_cards_strict === null) delete this.config.board_cards_strict;
     // The fleet reads it at each tool call; kept current here for the next spawn's tool menu.
     if (typeof update.office_access === "boolean") this.config.office_access = update.office_access;
     else if (update.office_access === null) delete this.config.office_access;
@@ -11206,6 +11208,7 @@ export class Daemon extends EventEmitter {
       instructions = buildFleetInstructions({
         instanceName: this.name,
         taskBoard: !dashboardOff.includes("task_board"),
+        strictCards: this.config.board_cards_strict === true,
         workingDirectory: this.config.working_directory,
         runtimeIdentity: this.runtimeIdentity,
         displayName: this.config.display_name,
@@ -11220,6 +11223,7 @@ export class Daemon extends EventEmitter {
       instructions = buildFleetInstructions({
         instanceName: this.name,
         taskBoard: !dashboardOff.includes("task_board"),
+        strictCards: this.config.board_cards_strict === true,
         workingDirectory: this.config.working_directory,
         runtimeIdentity: this.runtimeIdentity,
         displayName: this.config.display_name,

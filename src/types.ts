@@ -189,6 +189,12 @@ export interface InstanceConfig {
    */
   board_cards_at_once?: number;
   /**
+   * Strict cards: the task board holds this instance to filled-in cards — none opened without a goal and acceptance
+   * items, none started without them or at size L, none finished with an item unchecked, and the items others set kept.
+   * Default false. The fleet reads it at each write; the instance's instructions say so from its next start.
+   */
+  board_cards_strict?: boolean;
+  /**
    * Which dashboard features this instance may use, on top of its `tool_set` (dashboard-permissions.ts): `appearance`
    * (its own look: theme, pictures, widgets, ambient, effects, mod proposals), `task_board` (the `task` tool),
    * `web_settings` (Settings → Web appearance for the person). `false` switches one off; unset allows. Office uses

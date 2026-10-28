@@ -234,6 +234,7 @@ export function validateFleetConfig(config: unknown, opts: { rooms?: Iterable<st
     if (value.board_cards_at_once !== undefined && !(Number.isInteger(value.board_cards_at_once) && (value.board_cards_at_once as number) >= 1)) {
       err(`${path}.board_cards_at_once`, "must be a whole number of at least 1");
     }
+    if (value.board_cards_strict !== undefined && value.board_cards_strict !== null && typeof value.board_cards_strict !== "boolean") err(`${path}.board_cards_strict`, "must be a boolean");
     if (value.office_access !== undefined && value.office_access !== null && typeof value.office_access !== "boolean") err(`${path}.office_access`, "must be a boolean");
     if (value.office_pack_access !== undefined && value.office_pack_access !== null && typeof value.office_pack_access !== "boolean") err(`${path}.office_pack_access`, "must be a boolean");
     const dashboardProblem = dashboardAccessProblem(value.dashboard);

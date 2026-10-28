@@ -44,6 +44,8 @@ export const HOT_INSTANCE_CONFIG_KEYS: ReadonlySet<keyof InstanceConfig> = new S
   "cross_instance_visibility",
   // #2303: the fleet reads it at each task board claim; the daemon only keeps it current.
   "board_cards_at_once",
+  // Strict cards: the fleet reads it at each task board write; the instructions mention it from the next start.
+  "board_cards_strict",
   // The fleet reads it at each tool call; the daemon keeps it current for the next spawn's tool menu.
   "dashboard", "office_access", "office_pack_access",
 ]);
@@ -85,6 +87,8 @@ const INSTANCE_FIELDS = [
   "cross_instance_visibility",
   // #2303: read by the fleet at each task board claim.
   "board_cards_at_once",
+  // Read by the fleet at each task board write.
+  "board_cards_strict",
   // Read by the fleet at each tool call (dashboard-permissions.ts).
   "dashboard", "office_access", "office_pack_access",
 ] as const;

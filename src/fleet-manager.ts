@@ -122,7 +122,7 @@ import { createLogger, rotateLogIfNeeded, type Logger } from "./logger.js";
 import { processAttachments } from "./channel/attachment-handler.js";
 import { routeToolCall } from "./channel/tool-router.js";
 import { Scheduler } from "./scheduler/index.js";
-import { boardActivity, boardCardLimit, boardToolAction } from "./task-board-tool.js";
+import { boardActivity, boardCardLimit, boardCardsStrict, boardToolAction } from "./task-board-tool.js";
 import { TaskBoardWaker, namesCard } from "./task-board-waker.js";
 import { TaskBoardError, waitsForPerson, wrapUpGap, type Actor } from "./scheduler/task-board.js";
 import type { SchedulerDb } from "./scheduler/db.js";
@@ -18289,6 +18289,8 @@ export class FleetManager implements FleetContext, LifecycleContext, ArchiverCon
    */
   private attachTaskBoard(db: SchedulerDb): void {
     this.taskBoardWaker?.stop();
+    // Strict cards: which instances are held to filled-in cards, read at each write.
+    db.board.setStrictCards((name) => boardCardsStrict(this.fleetConfig, name));
     // #2303: each instance's cards at once, read at every claim (a fleet.yaml edit applies to the next one).
     db.board.setCardLimit((name) => boardCardLimit(this.fleetConfig, name));
     const waker = this.taskBoardWaker = new TaskBoardWaker({

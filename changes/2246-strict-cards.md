@@ -1,0 +1,4 @@
+---
+section: Added
+---
+- **Strict cards (`board_cards_strict`), and card rules for agents.** With `board_cards_strict: true` (per agent, or in `defaults`; off by default), the task board holds an agent to filled-in cards: it opens no card — nor `task`-tool task — without a goal and acceptance items, starts none that lacks them or is size L (split it first), finishes none with an acceptance item unchecked (a reason no longer excuses it: a card it cannot finish is blocked with the question), and keeps the acceptance items someone else set. Each refusal says what to do; a person is never held to it. Read at each write; the agent's instructions mention it from its next start. A ready-made `systemPrompt`, [card rules](examples/task-board-card-rules.md), tells agents how to fill a card in — goal, checkable items, `state`, the log, the result.

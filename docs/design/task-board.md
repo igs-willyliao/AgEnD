@@ -93,6 +93,16 @@ or the board itself.
     room (#2303 review).
 - **Taking a card back out of review.** An instance that withdraws its own card from `review` says why: the reason is
   a comment on the card ("withdrawn from review: …"), so the card never leaves the person's queue silently.
+- **Strict cards (`board_cards_strict`, per instance, default off).** The board's own leniency — a card with no
+  goal or checklist, an unchecked item excused by a reason — lets a card read cold say nothing of what it was for or
+  whether it was met. An instance held to strict cards: opens no card without a goal and acceptance items (its
+  `task` tool's plain create is refused, pointing to a board card), starts none that lacks them or is size L (split
+  first: a main task into sub tasks, a sub task into more of its main task's), finishes none with an item unchecked
+  (review, done, its own review, confirming a main task that followed its sub tasks, resubmitting one) — a reason
+  does not excuse it — and keeps the items others set: replacing the list may add, not drop or reword (a card it
+  opened is its own). Refusals are `strict_*` keys. A person is never held to it. The fleet reads it at each write;
+  the built-in workflow's task board section adds one line for such an agent. The rules people give in words are a
+  `systemPrompt` (docs/examples/task-board-card-rules.md).
 - **Comments an assignee has not seen.** Comments and send-backs by others after the assignee's last write are new to
   it; its next write returns them first (`notes`), so a comment posted mid-task is never acknowledged unread.
 - **Words.** A refusal carries a stable `code` (`forbidden`, `invalid`, `conflict`, `not_found`), a `key` naming the

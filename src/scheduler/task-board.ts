@@ -583,6 +583,7 @@ export class TaskBoard {
   private pending: Array<{ code: string; uuid: string; actor: Actor; type: CardEventType; data: Record<string, unknown> }> = [];
   private projectsChanged = false;
   private notes: Note[] = [];
+  private strictCards: (name: string) => boolean = () => false;
   /** The notes of the last write, until a caller of the `task` tool's old actions takes them (takeNotes). */
   private lastNotes: string[] = [];
   private codes = new Map<string, string>();
@@ -1322,6 +1323,9 @@ export class TaskBoard {
           if (kind === "sub" && spec.scope) throw new TaskBoardError("invalid", "scope is for main tasks only", "scope_main_only");
           const acceptance = checkAcceptance(spec.acceptance ?? []);
           if (acceptance.length > CARD_LIMITS.acceptanceItems) throw new TaskBoardError("too_long", `at most ${CARD_LIMITS.acceptanceItems} acceptance items`, "acceptance_max", [CARD_LIMITS.acceptanceItems]);
+          if (this.strict(actor) && (!spec.goal?.trim() || !acceptance.length)) {
+            throw new TaskBoardError("invalid", "strict cards: a card needs its goal (description: the outcome, in a sentence) and acceptance items (the checklist that defines done)", "strict_fields");
+          }
           const now = this.nowIso();
           const assignee = spec.assignee !== undefined ? normalizeAssignee(spec.assignee) : isPerson(actor) ? null : actor.name;
           const opener: Dispatcher | null = isPerson(actor) ? { kind: "person", name: actor.name }
@@ -1458,6 +1462,14 @@ export class TaskBoard {
 
       if (patch.acceptance !== undefined || patch.addAcceptance !== undefined || patch.check !== undefined || patch.uncheck !== undefined) {
         let acceptance = patch.acceptance !== undefined ? checkAcceptance(patch.acceptance, card.acceptance) : card.acceptance.map((a) => ({ ...a }));
+        // Strict cards: what someone else said done means stays — an item that cannot be met is asked about, not dropped.
+        if (patch.acceptance !== undefined && this.strict(actor) && card.createdBy !== actor.name) {
+          const kept = new Set(acceptance.map((a) => a.text));
+          if (card.acceptance.some((a) => !kept.has(a.text))) {
+            throw new TaskBoardError("forbidden", `strict cards: ${card.code}'s acceptance items were set by ${card.createdBy}: add items, but do not drop or reword theirs — `
+              + "if one cannot be met, move the card to blocked and ask", "strict_acceptance_kept", [card.code, card.createdBy]);
+          }
+        }
         if (patch.addAcceptance) acceptance = [...acceptance, ...checkAcceptance(patch.addAcceptance)];
         if (acceptance.length > CARD_LIMITS.acceptanceItems) throw new TaskBoardError("too_long", `at most ${CARD_LIMITS.acceptanceItems} acceptance items`, "acceptance_max", [CARD_LIMITS.acceptanceItems]);
         const mark = (indexes: number[] | undefined, done: boolean) => {
@@ -1592,6 +1604,10 @@ export class TaskBoard {
   legacyCreate(actor: Actor, params: { title: string; description?: string; priority?: CardPriority; assignee?: string; depends_on?: string[] }): Card {
     return this.tx(() => {
       const now = this.nowIso();
+      // Strict cards: a task without acceptance items is a card without them; open it as a board card with its fields.
+      if (this.strict(actor)) {
+        throw new TaskBoardError("invalid", "strict cards: open it as a board card, with its goal and acceptance items (task create title=… description=\"the outcome\" acceptance=[\"…\"])", "strict_fields");
+      }
       const card: Card = {
         uuid: randomUUID(), code: this.nextCode("M"), kind: "main", projectId: null, parent: null, title: params.title, status: "open",
         assignee: params.assignee ?? null, priority: params.priority ?? "normal", size: null, needsReview: false, onBoard: false,
@@ -1748,7 +1764,7 @@ export class TaskBoard {
   private ownReview(card: Card, actor: Actor, to: CardStatus, reason = "", check = true): CardStatus {
     if (to !== "review" || isPerson(actor) || card.status === "review" || !confirms(card, actor)) return to;
     // #2757 review: finished as done is, whichever way it came (a derived main task's review checks less).
-    if (check) this.checkFinish(card, true, reason);
+    if (check) this.checkFinish(card, actor, reason);
     this.say("own_review", [card.code], `${card.code} waits for nobody else's confirmation (you confirm it): done, not review`);
     return "done";
   }
@@ -1778,6 +1794,7 @@ export class TaskBoard {
               throw new TaskBoardError("blocked_by_deps", `${card.code} waits for ${unmet.map((c) => `${c.code} (${c.status})`).join(", ")}; do those first or take another card`);
             }
             if (startsWork) this.checkOneAtATime(card, actor);
+            if (startsWork && this.strict(actor)) this.checkStrictStart(card);
             if (!card.assignee) this.assign(card, actor.name, actor);
           } else if (unmet.length) {
             this.say("deps_unmet", [unmet.map((c) => c.code).join(", ")], `note: ${unmet.map((c) => c.code).join(", ")} ${unmet.length === 1 ? "is" : "are"} not done yet`);
@@ -1820,7 +1837,7 @@ export class TaskBoard {
           if (from !== "claimed") throw new TaskBoardError("invalid", `only a card in progress can go to review (${card.code} is ${from})`);
           if (!own) throw notOwner();
         }
-        this.checkFinish(card, ai, reason);
+        this.checkFinish(card, actor, reason);
         return;
       }
       case "done": {
@@ -1842,7 +1859,7 @@ export class TaskBoard {
         } else if (from === "review" && reason) {
           this.entry(card, "approve", actor, reason);
         }
-        this.checkFinish(card, ai, reason);
+        this.checkFinish(card, actor, reason);
         return;
       }
       case "open": {
@@ -1899,7 +1916,7 @@ export class TaskBoard {
       // #2080: a main task in review by itself (its sub tasks done) is finished by the instance that confirms it.
       if (from === "review" && to === "done" && confirms(card, actor)) {
         if (reason) this.entry(card, "approve", actor, reason);
-        this.checkFinish(card, ai, reason);
+        this.checkFinish(card, actor, reason);
         return;
       }
       if (from === "claimed" && to === "review") {
@@ -1908,13 +1925,14 @@ export class TaskBoard {
           throw new TaskBoardError("invalid", `${card.code} has unfinished sub tasks; it goes to review by itself when they are all done`);
         }
         if (!card.result) throw new TaskBoardError("invalid", "resubmitting needs a result: what changed and how it was checked");
+        if (this.strict(actor)) this.checkStrictFinish(card);
         return;
       }
       throw new TaskBoardError("forbidden", `${card.code} has sub tasks; its status follows them — move its sub tasks along`);
     }
     if (from === "review" && to === "done") {
       if (reason) this.entry(card, "approve", actor, reason);
-      this.checkFinish(card, ai, reason);
+      this.checkFinish(card, actor, reason);
       return;
     }
     if (from === "review" && to === "claimed") {
@@ -1927,11 +1945,12 @@ export class TaskBoard {
   }
 
   /** What leaving "in progress" as finished (review or done) needs. */
-  private checkFinish(card: Card, ai: boolean, reason: string): void {
+  private checkFinish(card: Card, actor: Actor, reason: string): void {
     const open = this.children(card.uuid).filter((k) => !isFinished(k));
     if (open.length) throw new TaskBoardError("invalid", `${card.code} still has unfinished sub tasks: ${open.map((k) => k.code).join(", ")}`, "unfinished_subs", [card.code, open.map((k) => k.code).join(", ")]);
-    if (!ai) return;
+    if (isPerson(actor)) return;
     if (!card.result) throw new TaskBoardError("invalid", "finishing needs a result: which files changed and how it was checked");
+    if (this.strict(actor)) this.checkStrictFinish(card);
     const unchecked = card.acceptance.map((a, i) => ({ ...a, n: i + 1 })).filter((a) => !a.done);
     if (unchecked.length && !reason) {
       throw new TaskBoardError("invalid", `${unchecked.length} acceptance item(s) unchecked (${unchecked.map((a) => a.n).join(", ")}); check them, or say why in the reason`);
@@ -1981,6 +2000,45 @@ export class TaskBoard {
     const count = this.inProgress(name).filter((c) => !openedForItself(c)).length;
     const limit = this.limitOf(name);
     return count > limit ? { count, limit } : null;
+  }
+
+  /**
+   * Which instances are held to strict cards (`board_cards_strict`; the fleet reads its config at each write). Such an
+   * instance opens no card without a goal and acceptance items, starts none that lacks them or is size L, finishes none
+   * with an item unchecked — a reason does not excuse it — and keeps the items others set on a card. A person never is.
+   */
+  setStrictCards(strict: (name: string) => boolean): void {
+    this.strictCards = strict;
+  }
+
+  private strict(actor: Actor): boolean {
+    return actor.kind === "instance" && this.strictCards(actor.name);
+  }
+
+  /** Strict cards: what a card needs before it is started — what it is for, what done means, and a size it can be done at. */
+  private checkStrictStart(card: Card): void {
+    if (!card.goal.trim() || !card.acceptance.length) {
+      throw new TaskBoardError("invalid", `strict cards: fill ${card.code} in before starting it — its goal and acceptance items `
+        + `(task update id=${card.code} description="the outcome" acceptance=["…", "…"])`, "strict_start", [card.code]);
+    }
+    if (card.size === "L") {
+      const main = card.parent ? this.codeOf(card.parent) : null;
+      throw new TaskBoardError("invalid", `strict cards: ${card.code} is size L, too big to start as one card — `
+        + (main ? `open its parts as sub tasks of ${main}` : `split it into sub tasks (task create parent=${card.code}) and start those`)
+        + `, or set its size to S or M if it is not that big`, "strict_size_l", [card.code]);
+    }
+  }
+
+  /** Strict cards: finishing needs every acceptance item checked; one that cannot be met is a question (blocked), not a reason. */
+  private checkStrictFinish(card: Card): void {
+    if (!card.acceptance.length) {
+      throw new TaskBoardError("invalid", `strict cards: ${card.code} has no acceptance items — add them (task update acceptance=["…"]) and check them before finishing it`, "strict_no_acceptance", [card.code]);
+    }
+    const unchecked = card.acceptance.map((a, i) => ({ ...a, n: i + 1 })).filter((a) => !a.done).map((a) => a.n);
+    if (unchecked.length) {
+      throw new TaskBoardError("invalid", `strict cards: ${unchecked.length} acceptance item(s) unchecked (${unchecked.join(", ")}) — check them (task update check=[…]); `
+        + "one that cannot be met is a question: move the card to blocked and ask", "strict_unchecked", [unchecked.length, unchecked.join(", ")]);
+    }
   }
 
   /** How many handed-out cards each instance may have in progress (the fleet reads its config; default 1). */

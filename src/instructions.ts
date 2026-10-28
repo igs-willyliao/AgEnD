@@ -28,6 +28,18 @@ export interface FleetInstructionsParams {
   cliInstructions?: string;
   /** False: the person switched this agent's task board off (`dashboard.task_board`): it is not told to use it. */
   taskBoard?: boolean;
+  /** True: the task board holds this agent to strict cards (`board_cards_strict`): its task board section says how. */
+  strictCards?: boolean;
+}
+
+/** What the built-in task board section adds for an agent held to strict cards (`board_cards_strict`). */
+export const STRICT_CARDS_GUIDANCE = "- Cards here are strict: a card you open needs its goal (description) and acceptance items; fill a card in before you start it, "
+  + "split a size L one first, and check every acceptance item before you finish — one that cannot be met is a question: block the card and ask. "
+  + "Keep the items someone else set (add, do not drop or reword).";
+
+/** The built-in template's task board section ("## Progress Tracking") with the strict cards line at its end. */
+export function withStrictCardsGuidance(workflow: string): string {
+  return workflow.replace(/^(## Progress Tracking\b[\s\S]*?)\n*(?=^## |(?![\s\S]))/m, (section) => `${section.trimEnd()}\n${STRICT_CARDS_GUIDANCE}\n\n`);
 }
 
 /** The built-in status set as default.md spells it. */
@@ -218,6 +230,7 @@ export function buildFleetInstructions(params: FleetInstructionsParams): string 
         workflowContent = readFileSync(join(here, "workflow-templates/default.md"), "utf-8");
         // The built-in template's task board section, only for an agent that may use the board (a custom one is the person's).
         if (params.taskBoard === false) workflowContent = withoutTaskBoardGuidance(workflowContent);
+        else if (params.strictCards) workflowContent = withStrictCardsGuidance(workflowContent);
       } catch { /* template not found — skip */ }
     }
     if (workflowContent) {
